@@ -151,6 +151,10 @@ internal sealed class FollowCamera
         {
             snap = true;
             reason = _haveDirection ? "new walk" : "first fix";
+            // Without this the flag stays false forever, every measurement is treated as a first
+            // fix, and the turn threshold below never applies - which is exactly what happened:
+            // 60 snaps in one run, all of them labelled "first fix".
+            _haveDirection = true;
         }
         else
         {

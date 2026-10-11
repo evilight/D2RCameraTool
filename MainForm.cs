@@ -52,6 +52,7 @@ namespace D2RCameraTool
         private Button ResetAll_Button = null!;
         private Button OverShoulder_Button = null!;
         private Button CaptureSample_Button = null!;
+        private CheckBox KeyEcho_CheckBox = null!;
         private System.Windows.Forms.Timer? wasdUiTimer;
         private System.Threading.Timer? wasdWriteTimer;
         private bool lastFocusState;
@@ -298,9 +299,13 @@ namespace D2RCameraTool
                 Location = new Point(304, 14),
                 Size = new Size(150, 26),
             };
+            KeyEcho_CheckBox = new CheckBox {
+                Text = "Key echo (log every key)", AutoSize = true,
+                Location = new Point(466, 19),
+            };
 
             SessionGroup.Controls.AddRange(new Control[] {
-                ResetAll_Button, OverShoulder_Button, CaptureSample_Button,
+                ResetAll_Button, OverShoulder_Button, CaptureSample_Button, KeyEcho_CheckBox,
             });
 
             ClientSize = new Size(ClientSize.Width, ClientSize.Height + extra);
@@ -310,6 +315,7 @@ namespace D2RCameraTool
             ResetAll_Button.Click += ResetAllValues_Click;
             OverShoulder_Button.Click += OverShoulder_Click;
             CaptureSample_Button.Click += CaptureSample_Click;
+            KeyEcho_CheckBox.CheckedChanged += (_, _) => Program.KeyEcho = KeyEcho_CheckBox.Checked;
         }
 
         /// <summary>
@@ -559,6 +565,11 @@ namespace D2RCameraTool
             // Feed the WASD control from the hook as well as from GetAsyncKeyState: a key this
             // hook swallows may never reach the input queue the polling API reads.
             Wasd.OnKeyPressed(e.KeyCode);
+
+            // Key echo, for working out what a key actually sends. See Program.KeyEcho.
+            if (Program.KeyEcho) {
+                Program.LogLine($"KEY vk=0x{(int)e.KeyCode:X2} ({e.KeyCode})");
+            }
 
             // Capture hotkey for the heading hunt. It fires from the hook, so it works while the
             // game holds focus - which matters, because clicking the tool would take focus away

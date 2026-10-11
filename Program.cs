@@ -543,6 +543,15 @@ namespace D2RCameraTool
         /// </summary>
         public static readonly CameraSampler Sampler = new();
 
+        /// <summary>
+        /// When true, every key the global hook sees is logged with its virtual-key code.
+        ///
+        /// Exists because a laptop F-key is often a multi-function key: pressing F9 alone can
+        /// send a media or system code rather than VK_F9, in which case a hotkey bound to F9
+        /// simply never matches. Echoing what actually arrives settles it instead of guessing.
+        /// </summary>
+        public static bool KeyEcho;
+
         public static void RefreshValues(long valuesBase)
         {
             if (valuesBase <= 0) return;

@@ -46,10 +46,15 @@ namespace D2RCameraTool
         private CheckBox WasdInvertPitch_CheckBox = null!;
         private CheckBox WasdBlock_CheckBox = null!;
         private CheckBox WasdFocus_CheckBox = null!;
+        private NumericUpDown WasdRate_UpDown = null!;
         private Label Wasd_Status_Label = null!;
         private System.Windows.Forms.Timer? wasdTimer;
         private bool lastFocusState;
         private DateTime lastWasdLog = DateTime.MinValue;
+        private const int DisplaySyncMs = 100;
+        private DateTime lastDisplaySync = DateTime.MinValue;
+        private bool pendingYaw, pendingPitch;
+        private float pendingYawValue, pendingPitchValue;
 
         public MainForm() {
             InitializeComponent();
@@ -125,6 +130,15 @@ namespace D2RCameraTool
                 Text = "Only while the game has focus", AutoSize = true,
                 Location = new Point(300, 48),
             };
+            var rateLabel = new Label {
+                Text = "Update (ms)", AutoSize = true,
+                Location = new Point(478, 50),
+            };
+            WasdRate_UpDown = new NumericUpDown {
+                Location = new Point(566, 47), Width = 56,
+                Minimum = 4, Maximum = 100, Increment = 2,
+                Value = WasdCameraControl.DefaultUpdateIntervalMs,
+            };
 
             Wasd_Status_Label = new Label {
                 AutoSize = false,
@@ -135,7 +149,7 @@ namespace D2RCameraTool
             WasdGroup.Controls.AddRange(new Control[] {
                 Wasd_CheckBox, speedLabel, WasdSpeed_UpDown, WasdBlock_CheckBox,
                 WasdInvertYaw_CheckBox, WasdInvertPitch_CheckBox, WasdFocus_CheckBox,
-                Wasd_Status_Label,
+                rateLabel, WasdRate_UpDown, Wasd_Status_Label,
             });
 
             ClientSize = new Size(ClientSize.Width, ClientSize.Height + extra);
@@ -148,6 +162,10 @@ namespace D2RCameraTool
             WasdInvertPitch_CheckBox.CheckedChanged += (_, _) => Wasd.InvertPitch = WasdInvertPitch_CheckBox.Checked;
             WasdBlock_CheckBox.CheckedChanged += (_, _) => Wasd.BlockKeys = WasdBlock_CheckBox.Checked;
             WasdFocus_CheckBox.CheckedChanged += (_, _) => { Wasd.RequireGameFocus = WasdFocus_CheckBox.Checked; UpdateWasdStatus(); };
+            WasdRate_UpDown.ValueChanged += (_, _) => {
+                Wasd.UpdateIntervalMs = (int)WasdRate_UpDown.Value;
+                if (wasdTimer is not null) wasdTimer.Interval = Wasd.UpdateIntervalMs;
+            };
 
             ApplyWasdToUi();
             UpdateWasdStatus();
@@ -162,6 +180,8 @@ namespace D2RCameraTool
             WasdInvertPitch_CheckBox.Checked = Wasd.InvertPitch;
             WasdBlock_CheckBox.Checked = Wasd.BlockKeys;
             WasdFocus_CheckBox.Checked = Wasd.RequireGameFocus;
+            WasdRate_UpDown.Value = (decimal)Math.Clamp(Wasd.UpdateIntervalMs,
+                (int)WasdRate_UpDown.Minimum, (int)WasdRate_UpDown.Maximum);
         }
 
         private void UpdateWasdStatus() {
@@ -176,23 +196,46 @@ namespace D2RCameraTool
         /// <summary>
         /// Called by the WASD tick. The spinner's change handler is detached around the
         /// assignment because it writes straight back to game memory.
+        ///
+        /// The sync is throttled: repainting a NumericUpDown 60+ times a second while the
+        /// window floats over the game (TopMost) is needless churn and a plausible source of
+        /// on-screen smearing during movement, so the readout updates ~10 times a second and
+        /// always catches up when movement stops.
         /// </summary>
         internal void SetYawDisplay(float value) {
-            CamPan_UpDown.ValueChanged -= CamPan_UpDown_ValueChanged!;
-            try {
-                CamPan_UpDown.Value = ClampToRange(CamPan_UpDown, (decimal)value);
-            } finally {
-                CamPan_UpDown.ValueChanged += CamPan_UpDown_ValueChanged!;
-            }
+            pendingYawValue = value;
+            pendingYaw = true;
+            FlushDisplaysIfDue();
         }
 
         internal void SetPitchDisplay(float value) {
-            PitchSpinner.ValueChanged -= PitchSpinner_ValueChanged!;
-            try {
-                PitchSpinner.Value = ClampToRange(PitchSpinner, (decimal)value);
-            } finally {
-                PitchSpinner.ValueChanged += PitchSpinner_ValueChanged!;
+            pendingPitchValue = value;
+            pendingPitch = true;
+            FlushDisplaysIfDue();
+        }
+
+        private void FlushDisplaysIfDue() {
+            if ((DateTime.UtcNow - lastDisplaySync).TotalMilliseconds < DisplaySyncMs) return;
+            FlushDisplays();
+        }
+
+        /// <summary>Writes any pending values to the spin boxes. Cheap no-op when nothing is pending.</summary>
+        internal void FlushDisplays() {
+            if (pendingYaw) {
+                pendingYaw = false;
+                CamPan_UpDown.ValueChanged -= CamPan_UpDown_ValueChanged!;
+                try { CamPan_UpDown.Value = ClampToRange(CamPan_UpDown, (decimal)pendingYawValue); }
+                finally { CamPan_UpDown.ValueChanged += CamPan_UpDown_ValueChanged!; }
             }
+
+            if (pendingPitch) {
+                pendingPitch = false;
+                PitchSpinner.ValueChanged -= PitchSpinner_ValueChanged!;
+                try { PitchSpinner.Value = ClampToRange(PitchSpinner, (decimal)pendingPitchValue); }
+                finally { PitchSpinner.ValueChanged += PitchSpinner_ValueChanged!; }
+            }
+
+            lastDisplaySync = DateTime.UtcNow;
         }
 
         private static decimal ClampToRange(NumericUpDown box, decimal value) =>
@@ -237,7 +280,7 @@ namespace D2RCameraTool
 
             // A dedicated ~60 Hz timer rather than Application.Idle: the WASD feel depends on
             // a steady cadence, and Idle only fires when the message queue happens to drain.
-            wasdTimer = new System.Windows.Forms.Timer { Interval = 16 };
+            wasdTimer = new System.Windows.Forms.Timer { Interval = Wasd.UpdateIntervalMs };
             wasdTimer.Tick += Wasd_Tick!;
             wasdTimer.Start();
 
@@ -256,6 +299,10 @@ namespace D2RCameraTool
                 lastWasdLog = DateTime.UtcNow;
                 Program.LogLine("WASD " + Wasd.DescribeGates());
             }
+
+            // Catch the readout up as soon as movement stops, so the throttle never leaves a
+            // stale value on screen.
+            if (!Wasd.AnyKeyHeld) FlushDisplays();
 
             if (Wasd.GameFocused != lastFocusState) {
                 lastFocusState = Wasd.GameFocused;
@@ -681,6 +728,7 @@ namespace D2RCameraTool
             data["wasd_invert_pitch"] = Wasd.InvertPitch ? "1" : "0";
             data["wasd_block_keys"] = Wasd.BlockKeys ? "1" : "0";
             data["wasd_require_focus"] = Wasd.RequireGameFocus ? "1" : "0";
+            data["wasd_update_ms"] = Wasd.UpdateIntervalMs.ToString(CultureInfo.InvariantCulture);
 
             for (int i=0; i<PresetsArray.Length; i++) {
                 float[] preset = { PresetsArray[i].Sensitivity, PresetsArray[i].Pitch, PresetsArray[i].Yaw, PresetsArray[i].Roll, PresetsArray[i].Height, PresetsArray[i].Zoom };
@@ -741,6 +789,10 @@ namespace D2RCameraTool
                         break;
                     case "wasd_require_focus":
                         Wasd.RequireGameFocus = pair.Value == "1";
+                        break;
+                    case "wasd_update_ms":
+                        if (int.TryParse(pair.Value, out int ms) && ms >= 4 && ms <= 100)
+                            Wasd.UpdateIntervalMs = ms;
                         break;
                     case "preset1":
                         preset = StringToFloats(pair.Value);

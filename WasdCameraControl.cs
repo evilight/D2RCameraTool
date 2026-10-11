@@ -19,15 +19,30 @@ internal sealed class WasdCameraControl
     /// <summary>Radians per second at the default speed setting.</summary>
     public const double DefaultSpeed = 1.2;
 
-    // Yaw is CLAMPED at +/-pi rather than wrapped. Wrapping made the value jump from +3.14 to
-    // -3.14, which reads as the view snapping round; stopping at the limit is the wanted
-    // behaviour. Pitch is clamped to a range that keeps the camera above the ground: -1.55 rad
-    // is almost straight down, +0.30 lifts it to look slightly up. These are the only numbers
-    // to tune if a limit feels wrong in game.
-    public const double YawMin = -Math.PI;
-    public const double YawMax = Math.PI;
-    public const double PitchMin = -1.55;
-    public const double PitchMax = 0.30;
+    /// <summary>Camera update period in milliseconds (~62 Hz).</summary>
+    public const int DefaultUpdateIntervalMs = 16;
+
+    // Limits are written in DEGREES and converted, so they can be reasoned about without
+    // doing radians in your head. Shared by the WASD keys and the mouse-drag path.
+    //
+    // Yaw is CLAMPED rather than wrapped: wrapping made the value jump from +180 to -180,
+    // which reads as the view snapping round. Clamping does not reduce the reachable range --
+    // [-180, +180] spans a full circle, just without the discontinuity at the ends.
+    //
+    // Pitch is the camera's elevation. Negative looks down at the ground, positive lifts the
+    // camera to look up. -89 is almost straight down; +89 puts the camera almost level with
+    // the player looking up, which the game was never authored for and may render oddly.
+    public const double YawMinDegrees = -180;
+    public const double YawMaxDegrees = 180;
+    public const double PitchMinDegrees = -89;
+    public const double PitchMaxDegrees = 89;
+
+    private const double DegToRad = Math.PI / 180.0;
+
+    public const double YawMin = YawMinDegrees * DegToRad;
+    public const double YawMax = YawMaxDegrees * DegToRad;
+    public const double PitchMin = PitchMinDegrees * DegToRad;
+    public const double PitchMax = PitchMaxDegrees * DegToRad;
 
     public bool Enabled = true;
     public double SpeedRadPerSec = DefaultSpeed;
@@ -36,6 +51,13 @@ internal sealed class WasdCameraControl
 
     /// <summary>Swallow W/A/S/D before the game sees them, while the game is focused.</summary>
     public bool BlockKeys = true;
+
+    /// <summary>
+    /// How often the camera is updated, in milliseconds. Exposed because the write rate
+    /// relative to the render rate is one of the candidate causes of ghosting while the
+    /// camera moves, and it is the only lever the tool itself controls.
+    /// </summary>
+    public int UpdateIntervalMs = 16;
 
     /// <summary>Only act while the game owns the foreground window.</summary>
     public bool RequireGameFocus = true;

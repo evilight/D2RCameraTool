@@ -49,6 +49,7 @@ namespace D2RCameraTool
         private Label Wasd_Status_Label = null!;
         private System.Windows.Forms.Timer? wasdTimer;
         private bool lastFocusState;
+        private DateTime lastWasdLog = DateTime.MinValue;
 
         public MainForm() {
             InitializeComponent();
@@ -64,6 +65,9 @@ namespace D2RCameraTool
 
         private void InitHotkeys() {
             GlobalHotkeys.HookKeyboard();
+            // A freshly installed hook has seen no key events, so any key tracked as held from
+            // a previous hook can never receive its key-up. Drop them or the direction sticks.
+            Wasd.ClearHeldKeys();
             GlobalHotkeys.KeyPressed += GlobalHotKey_Pressed!;
             GlobalHotkeys.KeyReleased += GlobalHotKey_Released!;
             // Lets the hook swallow W/A/S/D before the game sees them.
@@ -243,11 +247,21 @@ namespace D2RCameraTool
 
         private void Wasd_Tick(object sender, EventArgs e) {
             int pid = Program.ProcessFound && Program.MemLib.IsOpen ? Program.MemLib.ProcessId : 0;
-            Wasd.Tick(pid);
+            bool wrote = Wasd.Tick(pid);
+
+            // Diagnose the gates instead of leaving "nothing happens" unexplained. Logged when
+            // the raw key set changes, and throttled so holding a key does not flood the file.
+            bool keysActive = Wasd.RawAny || wrote;
+            if (keysActive && (DateTime.UtcNow - lastWasdLog).TotalMilliseconds > 700) {
+                lastWasdLog = DateTime.UtcNow;
+                Program.LogLine("WASD " + Wasd.DescribeGates());
+            }
 
             if (Wasd.GameFocused != lastFocusState) {
                 lastFocusState = Wasd.GameFocused;
                 UpdateWasdStatus();
+                Program.LogLine($"WASD focus changed: gameFocused={Wasd.GameFocused} "
+                                + $"foregroundPid={Wasd.ForegroundPid} attachedPid={pid}");
             }
         }
 
@@ -334,6 +348,10 @@ namespace D2RCameraTool
         }
 
         private void GlobalHotKey_Pressed(object sender, KeyEventArgs e) {
+            // Feed the WASD control from the hook as well as from GetAsyncKeyState: a key this
+            // hook swallows may never reach the input queue the polling API reads.
+            Wasd.OnKeyPressed(e.KeyCode);
+
             if (MousePanHotKey != Keys.None && e.KeyCode == MousePanHotKey) {
                 if (!IsMousePanPressed) {
                     StartPitchDragging();
@@ -348,6 +366,8 @@ namespace D2RCameraTool
         }
 
         private void GlobalHotKey_Released(object sender, KeyEventArgs e) {
+            Wasd.OnKeyReleased(e.KeyCode);
+
             if (MousePanHotKey != Keys.None && e.KeyCode == MousePanHotKey) {
                 IsMousePanPressed = false;
             } else if (MouseZoomHotKey != Keys.None && e.KeyCode == MouseZoomHotKey) {

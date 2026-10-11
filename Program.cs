@@ -328,6 +328,12 @@ namespace D2RCameraTool
             }
             catch { /* the label is best-effort */ }
 
+            LogLine(message);
+        }
+
+        /// <summary>Appends a line to d2rcamera.log without touching the status label.</summary>
+        internal static void LogLine(string message)
+        {
             try
             {
                 string log = Path.Combine(AppContext.BaseDirectory, "d2rcamera.log");

@@ -48,6 +48,9 @@ namespace D2RCameraTool
         private CheckBox WasdFocus_CheckBox = null!;
         private NumericUpDown WasdRate_UpDown = null!;
         private Label Wasd_Status_Label = null!;
+        private GroupBox SessionGroup = null!;
+        private Button ResetAll_Button = null!;
+        private CheckBox ResetZoom_CheckBox = null!;
         private System.Windows.Forms.Timer? wasdUiTimer;
         private System.Threading.Timer? wasdWriteTimer;
         private bool lastFocusState;
@@ -170,6 +173,93 @@ namespace D2RCameraTool
             UpdateWasdStatus();
         }
 
+        /// <summary>
+        /// One-click "leave the game as the tool found it, then quit": restores every camera
+        /// value and closes.
+        ///
+        /// This exists because the values are what the locator keys on. Leaving pitch or yaw
+        /// rotated means the legacy signature no longer matches on the next launch and the tool
+        /// has to fall back to the slower structural scan - or fails on a hostile layout. The
+        /// reset writes the pristine 1.6-era byte patterns, which is exactly what restores the
+        /// signature, rather than whatever values happened to be present when we attached.
+        /// </summary>
+        private void ResetAllAndExit_Click(object sender, EventArgs e) {
+            var restored = new List<string>();
+
+            try {
+                if (!Program.ValuesFound) {
+                    Program.LogLine("Reset all requested before the camera was located - nothing to restore");
+                } else {
+                    Program.PitchValue.Reset();
+                    Program.CamPanValue.Reset();
+                    Program.RollValue.Reset();
+                    Program.CamHeightValue.Reset();
+                    restored.AddRange(new[] { "pitch", "yaw", "roll", "height" });
+
+                    if (ResetZoom_CheckBox.Checked) {
+                        Program.ZoomValue.Reset();
+                        restored.Add("zoom");
+                    }
+
+                    // Read back so the log carries proof of what the game was left holding,
+                    // which is the thing that matters if the next launch cannot find the camera.
+                    Program.LogLine(
+                        $"Reset all ({string.Join(", ", restored)}) then exit. "
+                        + $"Read back: pitch={Program.PitchValue.Read():F6} "
+                        + $"yaw={Program.CamPanValue.Read():F6} "
+                        + $"roll={Program.RollValue.Read():F6} "
+                        + $"height={Program.CamHeightValue.Read():F6} "
+                        + $"zoom={Program.ZoomValue.Read():F6}");
+                }
+            } catch (Exception ex) {
+                Program.LogLine("Reset all failed: " + ex.Message);
+            }
+
+            Close();
+        }
+
+        /// <summary>
+        /// Compact strip under the WASD panel holding the reset-and-exit button. The designer
+        /// panel has no spare room (its lowest control ends 11 px above the bottom), so the
+        /// form is grown again rather than rearranging existing controls.
+        /// </summary>
+        private void BuildSessionPanel() {
+            const int groupH = 52;
+            const int extra = groupH + 6;
+
+            SessionGroup = new GroupBox {
+                Text = "Session",
+                Location = new Point(Main_Panel.Left, WasdGroup.Bottom + 6),
+                Size = new Size(Main_Panel.Width, groupH),
+            };
+
+            ResetAll_Button = new Button {
+                Text = "Reset all values and exit",
+                Location = new Point(10, 16),
+                Size = new Size(190, 26),
+            };
+            ResetZoom_CheckBox = new CheckBox {
+                Text = "also reset zoom", AutoSize = true,
+                Location = new Point(216, 21), Checked = true,
+            };
+
+            var hint = new Label {
+                Text = "Restores the original values so the camera can be found again next launch.",
+                AutoSize = true,
+                Location = new Point(360, 22),
+            };
+
+            SessionGroup.Controls.AddRange(new Control[] {
+                ResetAll_Button, ResetZoom_CheckBox, hint,
+            });
+
+            ClientSize = new Size(ClientSize.Width, ClientSize.Height + extra);
+            statusStrip1.Top += extra;
+            Controls.Add(SessionGroup);
+
+            ResetAll_Button.Click += ResetAllAndExit_Click;
+        }
+
         /// <summary>Pushes the control's settings into the widgets (used after loading the ini).</summary>
         private void ApplyWasdToUi() {
             Wasd_CheckBox.Checked = Wasd.Enabled;
@@ -242,6 +332,7 @@ namespace D2RCameraTool
 
             // After LoadSettingsIni so the loaded WASD settings reach the widgets.
             BuildWasdPanel();
+            BuildSessionPanel();
             InitHotkeys();
 
             TopMost = TopMost_CheckBox.Checked;
@@ -268,6 +359,15 @@ namespace D2RCameraTool
 
             TopMost = TopMost_CheckBox.Checked;
             UpdateWasdStatus();
+
+            // Record the real geometry once. Both extra panels are built in code and grow the
+            // form, so if a control ever ends up clipped or overlapping this says exactly where
+            // everything landed instead of leaving it to guesswork.
+            Program.LogLine(
+                $"Layout: client={ClientSize.Width}x{ClientSize.Height} "
+                + $"mainPanel={Main_Panel.Bounds} wasd={WasdGroup.Bounds} "
+                + $"session={SessionGroup.Bounds} "
+                + $"statusTop={statusStrip1.Top} statusH={statusStrip1.Height}");
         }
 
         /// <summary>Camera write step. Runs on a threadpool timer; must never touch a control.</summary>
@@ -521,6 +621,12 @@ namespace D2RCameraTool
         }
 
         private void Form1_FormClosed(object sender, FormClosedEventArgs e) {
+            // Release everything held on the machine's behalf before the process goes away:
+            // the write timer, and the raised system timer resolution.
+            wasdWriteTimer?.Dispose();
+            wasdWriteTimer = null;
+            wasdUiTimer?.Stop();
+            TimerResolution.Release();
             DestroyHotkeys();
             SaveSettingsIni();
         }

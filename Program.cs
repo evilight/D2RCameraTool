@@ -139,6 +139,109 @@ namespace D2RCameraTool
         // ------------------------------------------------------------ CLI mode
 
         /// <summary>
+        /// Searches the whole process for the character's world position.
+        ///
+        /// The sampler established that the triple just before the camera angles (at base-0x14,
+        /// base-0x10, base-0xc) is world space: it moves when the character walks and does NOT
+        /// move when the camera is rotated in place by 159 degrees. Everything else in that window
+        /// turned out to be view space, which is why no facing could be found near the camera -
+        /// a facing belongs to the character's unit, which lives elsewhere in the heap.
+        ///
+        /// So: find every structure holding that position. The unit is among them, and the unit is
+        /// where a heading would be stored.
+        /// </summary>
+        internal static void RunWorldPositionScan(long baseAddr, string outPath, Action<string> log)
+        {
+            /// <summary>Cap on dumped hits - a non-distinctive value can match millions.</summary>
+            const int HitLimit = 200;
+
+            float ReadF(long a) => MemLib.ReadFloat((ulong)a) ?? float.NaN;
+
+            float wx = ReadF(baseAddr - 0x14);
+            float wy = ReadF(baseAddr - 0x10);
+            float wz = ReadF(baseAddr - 0x0C);
+
+            if (float.IsNaN(wx) || float.IsNaN(wy) || float.IsNaN(wz))
+            {
+                log("worldpos-scan: could not read the triple before the camera angles");
+                return;
+            }
+
+            log($"worldpos-scan: character world position reads "
+                + $"({wx:F6}, {wy:F6}, {wz:F6}) at 0x{baseAddr - 0x14:X}");
+
+            // Search for the largest horizontal component: it is the most distinctive value, the
+            // height being near zero and shared by everything standing on the ground.
+            float target = Math.Abs(wx) >= Math.Abs(wz) ? wx : wz;
+
+            // A world position is a large number. If this reads as zero or anything small the
+            // offsets are wrong for this build, and searching would match millions of addresses -
+            // measured: a zero target matched 9.1 million of them.
+            if (Math.Abs(target) < 1f)
+            {
+                log($"worldpos-scan: the triple at base-0x14 reads ({wx:F6}, {wy:F6}, {wz:F6}), "
+                    + "which is not a world position - the offsets have changed for this build. "
+                    + "Nothing was searched.");
+                return;
+            }
+
+            byte[] pattern = BitConverter.GetBytes(target);
+
+            log($"worldpos-scan: searching the whole process for {target:F6} ...");
+            var hits = MemLib.FindAll(pattern);
+            log($"worldpos-scan: {hits.Count} address(es) hold that value");
+            if (hits.Count > HitLimit)
+                log($"worldpos-scan: dumping only the first {HitLimit} of them");
+
+            string dumpPath = Path.ChangeExtension(outPath, null) + "_worldpos.txt";
+            var sb = new StringBuilder();
+            sb.AppendLine($"# world position ({wx:F6}, {wy:F6}, {wz:F6})   camera base 0x{baseAddr:X}");
+            sb.AppendLine($"# searched for {target:F6}   hits {hits.Count}");
+
+            const int window = 0x100;   // bytes either side of each hit
+            foreach (ulong h in hits.Take(HitLimit))
+            {
+                long hh = (long)h;
+                sb.AppendLine();
+                sb.AppendLine($"=== hit at 0x{hh:X} ===");
+                var bytes = MemLib.ReadBytes((ulong)(hh - window), window * 2);
+                if (bytes is null)
+                {
+                    sb.AppendLine("  (unreadable)");
+                    continue;
+                }
+
+                // Mark the components of a position triple if they sit where the camera struct
+                // had them, i.e. at -0x14, -0x10, -0x0c relative to the hit.
+                for (int off = 0; off + 4 <= bytes.Length; off += 4)
+                {
+                    long addr = hh - window + off;
+                    float fv = BitConverter.ToSingle(bytes, off);
+                    int iv = BitConverter.ToInt32(bytes, off);
+                    long rel = addr - hh;
+                    string mark = "";
+                    if (rel == -0x14) mark = "  <== x?";
+                    else if (rel == -0x10) mark = "  <== y?";
+                    else if (rel == -0x0C) mark = "  <== z (searched value)";
+                    else if (rel == -0x04) mark = "  <== camera angles start here in the camera struct";
+                    if (Math.Abs(fv) > 1000f && Math.Abs(fv) < 1e7f)
+                        mark += "   [large float]";
+                    sb.AppendLine($"  {rel:+#7x}  0x{addr:X}  {fv,16:F6}  int {iv,12}{mark}");
+                }
+            }
+
+            try
+            {
+                File.WriteAllText(dumpPath, sb.ToString());
+                log($"worldpos-scan: written {dumpPath}");
+            }
+            catch (Exception ex)
+            {
+                log("worldpos-scan: could not write the dump: " + ex.Message);
+            }
+        }
+
+        /// <summary>
         /// Headless locate-only mode: attaches read-only, runs the locator and writes a
         /// JSON report. Used to re-derive signatures after a game update.
         /// </summary>
@@ -150,6 +253,7 @@ namespace D2RCameraTool
             string outPath = ArgValue(args, "--out") ?? "d2rcamera_scan.json";
             bool writeAccess = args.Any(a => a.Equals("--allow-write", StringComparison.OrdinalIgnoreCase));
             bool forceStructural = args.Any(a => a.Equals("--force-structural", StringComparison.OrdinalIgnoreCase));
+            bool worldScan = args.Any(a => a.Equals("--worldpos-scan", StringComparison.OrdinalIgnoreCase));
             string? pidArg = ArgValue(args, "--pid");
 
             var log = new StringBuilder();
@@ -189,9 +293,16 @@ namespace D2RCameraTool
                 return 3;
             }
 
-            var report = new
+            if (worldScan)
             {
-                process,
+                if (res.Found && res.Best is not null)
+                    RunWorldPositionScan((long)res.Best.Base, outPath, Log);
+                else
+                    Log("--worldpos-scan needs a located camera; the scan was skipped");
+            }
+
+            var report = new
+            {                process,
                 pid = MemLib.ProcessId,
                 found = res.Found,
                 method = res.Method,

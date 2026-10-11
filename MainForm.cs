@@ -53,6 +53,7 @@ namespace D2RCameraTool
         private Button OverShoulder_Button = null!;
         private Button CaptureSample_Button = null!;
         private CheckBox KeyEcho_CheckBox = null!;
+        private Button WorldScan_Button = null!;
         private System.Windows.Forms.Timer? wasdUiTimer;
         private System.Threading.Timer? wasdWriteTimer;
         private bool lastFocusState;
@@ -303,9 +304,15 @@ namespace D2RCameraTool
                 Text = "Key echo (log every key)", AutoSize = true,
                 Location = new Point(466, 19),
             };
+            WorldScan_Button = new Button {
+                Text = "World pos scan",
+                Location = new Point(630, 14),
+                Size = new Size(120, 26),
+            };
 
             SessionGroup.Controls.AddRange(new Control[] {
                 ResetAll_Button, OverShoulder_Button, CaptureSample_Button, KeyEcho_CheckBox,
+                WorldScan_Button,
             });
 
             ClientSize = new Size(ClientSize.Width, ClientSize.Height + extra);
@@ -316,6 +323,33 @@ namespace D2RCameraTool
             OverShoulder_Button.Click += OverShoulder_Click;
             CaptureSample_Button.Click += CaptureSample_Click;
             KeyEcho_CheckBox.CheckedChanged += (_, _) => Program.KeyEcho = KeyEcho_CheckBox.Checked;
+            WorldScan_Button.Click += WorldScan_Click;
+        }
+
+        /// <summary>
+        /// Searches the whole process for the character's world position, on a background thread -
+        /// it reads several gigabytes and takes around ten seconds.
+        /// </summary>
+        private void WorldScan_Click(object? sender, EventArgs e) {
+            if (!Program.ValuesFound || Program.PitchValue.BaseAddress <= 0) {
+                Program.LogLine("World position scan requested before the camera was located");
+                return;
+            }
+
+            long baseAddr = Program.PitchValue.BaseAddress;
+            string outPath = Path.Combine(AppContext.BaseDirectory, "worldscan.json");
+            WorldScan_Button.Enabled = false;
+            Program.LogLine("World position scan started - this takes about ten seconds");
+
+            System.Threading.Tasks.Task.Run(() => {
+                try {
+                    Program.RunWorldPositionScan(baseAddr, outPath, Program.LogLine);
+                } catch (Exception ex) {
+                    Program.LogLine("World position scan failed: " + ex.Message);
+                } finally {
+                    try { BeginInvoke(() => WorldScan_Button.Enabled = true); } catch { }
+                }
+            });
         }
 
         /// <summary>

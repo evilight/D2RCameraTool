@@ -174,6 +174,17 @@ internal sealed class WasdCameraControl
             ? $"async={(s.async ? "Y" : "n")}/hook={(s.hook ? "Y" : "n")}"
             : "?";
 
+    /// <summary>
+    /// Compact fingerprint of every gate plus the held keys. The caller logs only when this
+    /// changes, so holding a key produces one line instead of one every throttle interval.
+    /// </summary>
+    public string Signature()
+    {
+        string keys = (RawA ? "A" : "") + (RawD ? "D" : "") + (RawW ? "W" : "") + (RawS ? "S" : "");
+        return $"{(Enabled ? "on" : "off")}/{(BlockKeys ? "block" : "pass")}"
+             + $"/{(RequireGameFocus ? "focus" : "any")}/f={(_gameFocused ? 1 : 0)}/k={keys}";
+    }
+
     /// <summary>Every gate that can stop WASD from moving the camera, for the log.</summary>
     public string DescribeGates() =>
         $"enabled={Enabled} block={BlockKeys} requireFocus={RequireGameFocus} "

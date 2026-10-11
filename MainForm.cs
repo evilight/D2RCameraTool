@@ -51,7 +51,7 @@ namespace D2RCameraTool
         private System.Windows.Forms.Timer? wasdUiTimer;
         private System.Threading.Timer? wasdWriteTimer;
         private bool lastFocusState;
-        private DateTime lastWasdLog = DateTime.MinValue;
+        private string lastWasdSignature = string.Empty;
 
         public MainForm() {
             InitializeComponent();
@@ -290,18 +290,18 @@ namespace D2RCameraTool
 
             int pid = Program.ProcessFound && Program.MemLib.IsOpen ? Program.MemLib.ProcessId : 0;
 
-            // Diagnose the gates instead of leaving "nothing happens" unexplained.
-            if ((Wasd.RawAny || Wasd.AnyKeyHeld)
-                && (DateTime.UtcNow - lastWasdLog).TotalMilliseconds > 700) {
-                lastWasdLog = DateTime.UtcNow;
+            // Log the gates only on a transition. Logging on a timer produced a line every
+            // 700 ms for as long as a key was held, which turns an hour of play into thousands
+            // of lines and buries the events that actually matter.
+            string signature = Wasd.Signature();
+            if (signature != lastWasdSignature) {
+                lastWasdSignature = signature;
                 Program.LogLine("WASD " + Wasd.DescribeGates());
             }
 
             if (Wasd.GameFocused != lastFocusState) {
                 lastFocusState = Wasd.GameFocused;
                 UpdateWasdStatus();
-                Program.LogLine($"WASD focus changed: gameFocused={Wasd.GameFocused} "
-                                + $"foregroundPid={Wasd.ForegroundPid} attachedPid={pid}");
             }
         }
 

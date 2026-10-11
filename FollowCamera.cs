@@ -5,26 +5,37 @@ namespace D2RCameraTool;
 /// <summary>
 /// Keeps the camera behind the character, derived from the character's own movement.
 ///
-/// A stored heading was hunted for several sessions and was found - a unit 2D direction vector
-/// that reverses by exactly 180 degrees when the character turns - but it lives nowhere near the
-/// world position, so it cannot be located reliably from the camera struct. Twice it fell inside
-/// a dumped region, and once it did not. Anchoring on it was the wrong approach.
+/// In Diablo the character always faces the direction it walks - there is no strafing and no
+/// backpedalling - so the movement direction IS the facing, and the world position is locatable
+/// at a fixed offset from the camera base (base-0x14 x, base-0x10 height, base-0x0c z), verified
+/// across five sessions. A stored heading field exists but lives nowhere near the position, so
+/// anchoring on it never worked reliably; this does not need it.
 ///
-/// It is also unnecessary. In Diablo the character always faces the direction it walks: there is
-/// no strafing and no backpedalling. So the movement direction IS the facing, and the world
-/// position is locatable at a fixed offset from the camera base, verified across four sessions.
+/// The camera SNAPS rather than interpolates, which is the important part. Rotating gradually
+/// while the character walks is disorienting in a click-to-move game: the screen turns under the
+/// player and the meaning of the next click changes while they are aiming it. Instead the
+/// direction is measured from the first real step and the yaw is set to its final value in one
+/// go, so the view is stable for the whole walk.
 ///
-/// What remains is the mapping from a world direction to the yaw value, and that is affine:
-/// yaw = +/-psi + offset. Two parameters, both settable from the UI, which is why this class
-/// exposes Invert and Offset rather than trying to derive them.
+/// A new click that sends the character elsewhere changes the measured direction, which snaps
+/// the camera again - once, at the start of that walk.
+///
+/// yaw = (+/-direction) + Offset. The sign and the offset are the only two unknowns, and both are
+/// on the panel so they can be tuned while playing.
 /// </summary>
 internal sealed class FollowCamera
 {
-    /// <summary>How far the character must move before the direction is updated, in world units.</summary>
-    private const float MoveThreshold = 0.35f;
+    /// <summary>
+    /// World units that must accumulate before the direction is re-measured. A step, not a
+    /// twitch: below this the delta is mostly float noise and would jitter the camera.
+    /// </summary>
+    private const float MoveThreshold = 1.0f;
 
-    /// <summary>How much of each new measurement to blend in. Low, because the facing should not jitter.</summary>
-    private const float Smoothing = 0.25f;
+    /// <summary>
+    /// How much the direction must change before the camera is re-aimed. Anything smaller is
+    /// held, so the camera sits perfectly still while the character walks a straight line.
+    /// </summary>
+    private const double SnapThreshold = 0.08;
 
     public bool Enabled;
     public bool Invert;
@@ -44,25 +55,26 @@ internal sealed class FollowCamera
     public double Direction => _direction;
     public double LastYawWritten { get; private set; }
     public bool Active { get; private set; }
+    public int SnapCount { get; private set; }
 
     /// <summary>Drops the tracked position, so a relocated camera does not produce a bogus jump.</summary>
     public void Reset()
     {
         _haveLast = false;
         _haveDirection = false;
+        _loggedRoll = false;
+        SnapCount = 0;
         Active = false;
     }
 
     /// <summary>
-    /// Reads the character's world position, updates the movement direction if it moved enough,
-    /// and writes the yaw. Returns true when a value was written.
+    /// Reads the character's world position, re-aims the camera when the direction actually
+    /// changed, and holds it otherwise. Returns true when a value was written.
     /// </summary>
     public bool Tick()
     {
         if (!Enabled || !Program.ValuesFound || !Program.WriteAccessAvailable) return false;
 
-        // Offsets verified against the live game: the character's world position sits at
-        // base-0x14 (x), base-0x10 (height), base-0x0c (z), just before the camera angles.
         long baseAddr = Program.PitchValue.BaseAddress;
         if (baseAddr <= 0) return false;
 
@@ -84,29 +96,35 @@ internal sealed class FollowCamera
         float dz = z - _lastZ;
         float moved = MathF.Sqrt(dx * dx + dz * dz);
 
-        if (moved >= MoveThreshold)
+        if (moved < MoveThreshold) return false;   // hold: too little movement to mean anything
+
+        _lastX = x;
+        _lastZ = z;
+
+        double measured = Math.Atan2(dz, dx);
+        bool snap;
+
+        if (!_haveDirection)
         {
-            double measured = Math.Atan2(dz, dx);
+            _direction = measured;
+            _haveDirection = true;
+            snap = true;
+        }
+        else
+        {
+            double change = measured - _direction;
+            while (change > Math.PI) change -= 2 * Math.PI;
+            while (change < -Math.PI) change += 2 * Math.PI;
 
-            if (!_haveDirection)
-            {
-                _direction = measured;
-                _haveDirection = true;
-            }
-            else
-            {
-                // Blend in the short way round, so crossing the +/-pi seam does not spin the camera.
-                double delta = measured - _direction;
-                while (delta > Math.PI) delta -= 2 * Math.PI;
-                while (delta < -Math.PI) delta += 2 * Math.PI;
-                _direction += delta * Smoothing;
-            }
+            // Only a real change of direction moves the camera - a new click. Anything under the
+            // threshold is measurement noise on a straight walk and must not nudge the view.
+            if (Math.Abs(change) < SnapThreshold) return false;
 
-            _lastX = x;
-            _lastZ = z;
+            _direction = measured;
+            snap = true;
         }
 
-        if (!_haveDirection) return false;
+        if (!snap) return false;
 
         double target = (_direction + Offset) * (Invert ? -1 : 1);
         target = WrapPi(target);
@@ -116,6 +134,8 @@ internal sealed class FollowCamera
             Active = false;
             return false;
         }
+
+        SnapCount++;
 
         // A follow camera should be level. The isometric view carries a deliberate 5.7 degree roll
         // (0.099046 rad) that reads as the ground tilting once the camera sits behind the
@@ -140,23 +160,16 @@ internal sealed class FollowCamera
         LastYawWritten = target;
         Active = true;
 
-        // Throttled trace. The two camera copies are both written, so a persistent disagreement
-        // means the engine is overwriting one of them afterwards - and if the renderer reads the
-        // copy we do not control, the view can only ever be partly right.
-        var now = DateTime.UtcNow;
-        if ((now - _lastLog).TotalMilliseconds > 500)
+        float mirror = float.NaN;
+        foreach (long m in Program.CameraMirrors)
         {
-            _lastLog = now;
-            float mirror = float.NaN;
-            foreach (long m in Program.CameraMirrors)
-            {
-                var v = Program.MemLib.ReadFloat((ulong)(m + 0x8));
-                if (v.HasValue) { mirror = v.Value; break; }
-            }
-            Program.LogLine(
-                $"Follow: pos=({x:F2},{z:F2}) moved={moved:F3} dir={_direction:F4} "
-                + $"yaw={target:F4} mirror={mirror:F4} diff={mirror - target:F4}");
+            var v = Program.MemLib.ReadFloat((ulong)(m + 0x8));
+            if (v.HasValue) { mirror = v.Value; break; }
         }
+
+        Program.LogLine(
+            $"Follow snap #{SnapCount}: pos=({x:F2},{z:F2}) dir={_direction:F4} "
+            + $"-> yaw={target:F4} mirror={mirror:F4} diff={mirror - target:F4}");
 
         return true;
     }

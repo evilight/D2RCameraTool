@@ -1,11 +1,13 @@
-using Memory;
 using System.Diagnostics;
+using System.Text;
+using System.Text.Json;
 
 namespace D2RCameraTool
 {
     internal static class Program
     {
-        public static Mem MemLib;
+        /// <summary>Win32 memory access, replacing the former Memory.dll dependency.</summary>
+        public static Win32Memory MemLib = new();
 
         public static bool ProgramEnabled = true;
         public static bool ProcessFound;
@@ -14,131 +16,285 @@ namespace D2RCameraTool
         public static bool ValuesFound;
         public static bool ZoomFound;
 
-        public static MainForm MainFormInstance;
+        public static MainForm MainFormInstance = null!;
 
-        public static FloatValue PitchValue;
-        public static FloatValue CamHeightValue;
-        public static FloatValue CamPanValue;
-        public static FloatValue RollValue;
-        public static FloatValue ZoomValue;
+        public static FloatValue PitchValue = null!;
+        public static FloatValue CamHeightValue = null!;
+        public static FloatValue CamPanValue = null!;
+        public static FloatValue RollValue = null!;
+        public static FloatValue ZoomValue = null!;
 
-        /// <summary>
-        ///  The main entry point for the application.
-        /// </summary>
+        public static string LastScanLog = string.Empty;
+
+        // ------------------------------------------------------------ entry point
+
         [STAThread]
-        static void Main() {
-            // To customize application configuration such as set high DPI settings or default font,
-            // see https://aka.ms/applicationconfiguration.
+        static int Main(string[] args)
+        {
+            if (args.Any(a => a.Equals("--cli", StringComparison.OrdinalIgnoreCase)))
+            {
+                return RunCli(args);
+            }
+
             ApplicationConfiguration.Initialize();
             MainFormInstance = new MainForm();
-            if (MainFormInstance == null) {
-                Application.Exit();
-            }
             Application.Run(MainFormInstance);
+            return 0;
         }
 
-        public static void EnableChecked() {
-            ProgramEnabled = true;
+        // ------------------------------------------------------------ CLI mode
+
+        /// <summary>
+        /// Headless locate-only mode: attaches read-only, runs the locator and writes a
+        /// JSON report. Used to re-derive signatures after a game update.
+        /// </summary>
+        private static int RunCli(string[] args)
+        {
+            AttachConsole(-1);
+
+            string process = ArgValue(args, "--process") ?? "D2R";
+            string outPath = ArgValue(args, "--out") ?? "d2rcamera_scan.json";
+            bool writeAccess = args.Any(a => a.Equals("--allow-write", StringComparison.OrdinalIgnoreCase));
+            string? pidArg = ArgValue(args, "--pid");
+
+            var log = new StringBuilder();
+            void Log(string s)
+            {
+                Console.WriteLine(s);
+                log.AppendLine(s);
+            }
+
+            Log($"D2RCameraTool CLI  process={process}  writeAccess={writeAccess}");
+
+            bool opened = pidArg is not null && int.TryParse(pidArg, out int pid)
+                ? MemLib.Open(pid, writeAccess)
+                : MemLib.OpenByName(process, writeAccess);
+
+            if (!opened)
+            {
+                Log($"could not open '{process}' (is the game running?)");
+                return 2;
+            }
+            Log($"attached pid {MemLib.ProcessId}");
+
+            var cts = new CancellationTokenSource();
+            Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
+
+            LocateResult res;
+            try
+            {
+                res = CameraLocator.Locate(MemLib, Log, cts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                Log("cancelled");
+                return 3;
+            }
+
+            var report = new
+            {
+                process,
+                pid = MemLib.ProcessId,
+                found = res.Found,
+                method = res.Method,
+                best = res.Best is null ? null : new
+                {
+                    address = "0x" + res.Best.Base.ToString("X"),
+                    res.Best.Roll,
+                    res.Best.Pitch,
+                    res.Best.Height,
+                    res.Best.Yaw,
+                    res.Best.LegacyExactFields,
+                    res.Best.Churn,
+                    res.Best.Score,
+                },
+                candidates = res.Candidates.Take(50).Select(c => new
+                {
+                    address = "0x" + c.Base.ToString("X"),
+                    c.Roll,
+                    c.Pitch,
+                    c.Height,
+                    c.Yaw,
+                    c.LegacyExactFields,
+                    c.Churn,
+                    c.Score,
+                }),
+                log = log.ToString().Split('\n'),
+            };
+
+            string json = JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true });
+            try
+            {
+                File.WriteAllText(outPath, json);
+                Log($"wrote {outPath}");
+            }
+            catch (Exception ex)
+            {
+                Log("could not write report: " + ex.Message);
+                Console.WriteLine(json);
+            }
+
+            return res.Found ? 0 : 1;
         }
 
-        public static void EnableUnchecked() {
-            ProgramEnabled = false;
+        private static string? ArgValue(string[] args, string name)
+        {
+            int i = Array.FindIndex(args, a => a.Equals(name, StringComparison.OrdinalIgnoreCase));
+            return i >= 0 && i + 1 < args.Length ? args[i + 1] : null;
         }
 
-        public static void FormShown_Callback() {
-            Init();
-        }
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+        private static extern bool AttachConsole(int dwProcessId);
 
-        private static void InitTimers() {
+        // ------------------------------------------------------------ GUI plumbing
+
+        public static void EnableChecked() => ProgramEnabled = true;
+        public static void EnableUnchecked() => ProgramEnabled = false;
+
+        public static void FormShown_Callback() => Init();
+
+        private static void Init()
+        {
+            InitValues();
             GlobalTimers.Reset();
         }
 
-        private static void Init() {
-
-
-
-            MemLib = new Mem();
-
-            if (MemLib == null) {
-                MessageBox.Show("Failed to initialize Memory.dll. Check Windows Defender or other antivirus software for false positive detection. Please see:\nhttps://github.com/erfg12/memory.dll/", "Error", MessageBoxButtons.OK);
-                Application.Exit();
-            }
-            InitValues();
-            InitTimers();
-        }
-
-        private static void InitValues() {
-            PitchValue = new FloatValue(new byte[] { 0x44, 0x74, 0x64, 0xBF });
-            CamHeightValue = new FloatValue(new byte[] { 0x3F, 0xDB, 0x74, 0x3E });
-            CamPanValue = new FloatValue(new byte[] { 0xF4, 0x41, 0xBD, 0x3E });
-            RollValue = new FloatValue(new byte[] { 0x81, 0xD8, 0xCA, 0x3D });
+        private static void InitValues()
+        {
+            PitchValue = new FloatValue(CameraLocator.DefaultPitchBytes);
+            CamHeightValue = new FloatValue(CameraLocator.DefaultHeightBytes);
+            CamPanValue = new FloatValue(CameraLocator.DefaultYawBytes);
+            RollValue = new FloatValue(CameraLocator.DefaultRollBytes);
             ZoomValue = new FloatValue(new byte[] { 0x00, 0x00, 0x00, 0x00 });
         }
 
-        public static void Idle_Tick(object sender, EventArgs e) {
+        public static void Idle_Tick(object sender, EventArgs e) { }
 
-        }
-
-        public static void ProcessScan_Tick() {
-            if (!ProgramEnabled || ProcessFound)
-                return;
+        public static void ProcessScan_Tick()
+        {
+            if (!ProgramEnabled || ProcessFound) return;
 
             string process = MainFormInstance.ProcessName_Text.Text;
-            if (string.IsNullOrWhiteSpace(process))
-                return;
+            if (string.IsNullOrWhiteSpace(process)) return;
 
-            if (MemLib.OpenProcess(process)) {
+            if (MemLib.OpenByName(process))
+            {
                 ProcessFound = true;
                 MainFormInstance.ProcessName_Text.Enabled = false;
                 MainFormInstance.Status_Label.Text = "Process found!";
                 PlayBeepSound();
-                // Timers.BeginAngleScan_Timer.Start();
             }
         }
 
-        public static async void ValueScan_Tick() {
-            if (!ProgramEnabled || ValuesFound || IsAngleScanning || !ProcessFound)
-                return;
-
+        public static async void ValueScan_Tick()
+        {
+            if (!ProgramEnabled || ValuesFound || IsAngleScanning || !ProcessFound) return;
             IsAngleScanning = true;
-            MainFormInstance.Status_Label.Text = "Be patient, searching...";
-            var scan = await MemLib.AoBScan(0, 0x7FFFFFFFFFFF, "44 74 64 BF 3F DB 74 3E F4 41 BD 3E", true);
-            long result = scan.FirstOrDefault();
-            if (result != 0) {
+
+            var log = new StringBuilder();
+            MainFormInstance.Status_Label.Text = "Searching for camera values...";
+
+            LocateResult res;
+            try
+            {
+                res = await Task.Run(() => CameraLocator.Locate(
+                    MemLib, s => log.AppendLine(s), CancellationToken.None));
+            }
+            catch (Exception ex)
+            {
+                MainFormInstance.Status_Label.Text = "Scan failed: " + ex.Message;
+                IsAngleScanning = false;
+                return;
+            }
+            finally
+            {
+                LastScanLog = log.ToString();
+            }
+
+            if (res.Found && res.Best is not null)
+            {
                 ValuesFound = true;
                 PlayBeepSound();
-                MainFormInstance.Status_Label.Text = "Values found at: " + "0x" + result.ToString("X");
-                RefreshValues(result);
+                RefreshValues((long)res.Best.Base);
                 UnlockValueControls();
+                MainFormInstance.Status_Label.Text =
+                    $"Found via {res.Method} at 0x{res.Best.Base:X} "
+                    + $"(legacy {res.Best.LegacyExactFields}/4, churn {res.Best.Churn})";
             }
+            else
+            {
+                MainFormInstance.Status_Label.Text =
+                    "Camera values not found - see status log, try again in-game";
+            }
+
             IsAngleScanning = false;
         }
 
-        public static async void ZoomScan_Tick() {
-            if (!ProgramEnabled || ZoomFound || !ValuesFound || IsZoomScanning || !ProcessFound)
-                return;
+        /// <summary>
+        /// Zoom keeps its original signature, but expressed as pattern+mask so the
+        /// wildcard bytes are explicit rather than a string Memory.dll had to parse.
+        /// </summary>
+        private static readonly byte[] ZoomPattern =
+        {
+            0x00,0x00,0x06,0x00,0x00,0x00, 0,0,0,0,0,0,0, 0x43, 0,0,0,0,0,0,0,0,
+            0x00,0x00,0x00,0x00, 0x01,0x00,0x00,0x00, 0x00,0x00,0x00,0x00, 0x00,0x00,0x80,0x3F
+        };
+
+        private static readonly byte[] ZoomMask = BuildZoomMask();
+
+        private static byte[] BuildZoomMask()
+        {
+            var m = new byte[ZoomPattern.Length];
+            Array.Fill(m, (byte)0xFF);
+            for (int i = 6; i < 13; i++) m[i] = 0x00;
+            for (int i = 14; i < 22; i++) m[i] = 0x00;
+            return m;
+        }
+
+        public static async void ZoomScan_Tick()
+        {
+            if (!ProgramEnabled || ZoomFound || !ValuesFound || IsZoomScanning || !ProcessFound) return;
             IsZoomScanning = true;
 
-            MainFormInstance.Status_Label.Text = "Next step, searching for zoom value...";
-            var scan = await MemLib.AoBScan(0, 0x7FFFFFFFFFFF, "00 00 06 00 00 00 ?? ?? ?? ?? ?? ?? ?? 43 ?? ?? ?? ?? ?? ?? ?? ?? 00 00 00 00 01 00 00 00 00 00 00 00 00 00 80 3F", true);
-            long result = scan.FirstOrDefault();
-            if (result != 0) {
-                long zoomBase = result + 0x32;
-                ZoomValue.UpdateBase(zoomBase);
+            MainFormInstance.Status_Label.Text = "Searching for zoom value...";
+            ulong hit = 0;
+            try
+            {
+                hit = await Task.Run(() =>
+                {
+                    foreach (var h in MemLib.FindPattern(ZoomPattern, ZoomMask))
+                        return h;
+                    return 0UL;
+                });
+            }
+            catch (Exception ex)
+            {
+                MainFormInstance.Status_Label.Text = "Zoom scan failed: " + ex.Message;
+                IsZoomScanning = false;
+                return;
+            }
+
+            if (hit != 0)
+            {
+                ulong zoomBase = hit + 0x32;
+                ZoomValue.UpdateBase((long)zoomBase);
                 ZoomFound = true;
                 PlayBeepSound();
-                MainFormInstance.Status_Label.Text = "Zoom found at: " + "0x" + zoomBase.ToString("X");
-                UnlockZoomControls();                
+                MainFormInstance.Status_Label.Text = "Zoom found at: 0x" + zoomBase.ToString("X");
+                UnlockZoomControls();
                 MainFormInstance.Zoom_UpDown.Value = (decimal)ZoomValue.Read();
-                //RefreshValues(result);
-                //UnlockValueControls();
             }
+            else
+            {
+                MainFormInstance.Status_Label.Text = "Zoom value not found";
+            }
+
             IsZoomScanning = false;
         }
 
-        public static void RefreshValues(long valuesBase) {
-            if (valuesBase <= 0)
-                return;
+        public static void RefreshValues(long valuesBase)
+        {
+            if (valuesBase <= 0) return;
 
             PitchValue.UpdateBase(valuesBase);
             CamHeightValue.UpdateBase(valuesBase + 0x4);
@@ -151,7 +307,8 @@ namespace D2RCameraTool
             MainFormInstance.Roll_UpDown.Value = (decimal)RollValue.Read();
         }
 
-        private static void UnlockValueControls(bool unlocked = true) {
+        private static void UnlockValueControls(bool unlocked = true)
+        {
             MainFormInstance.PitchAngle_CheckBox.Enabled = unlocked;
             MainFormInstance.PitchSpinner.Enabled = unlocked;
             MainFormInstance.PitchReset.Enabled = unlocked;
@@ -170,66 +327,67 @@ namespace D2RCameraTool
             MainFormInstance.RollReset_Button.Enabled = unlocked;
         }
 
-        private static void UnlockZoomControls(bool unlocked = true) {
+        private static void UnlockZoomControls(bool unlocked = true)
+        {
             MainFormInstance.Zoom_CheckBox.Enabled = unlocked;
             MainFormInstance.Zoom_UpDown.Enabled = unlocked;
             MainFormInstance.ZoomReset_Button.Enabled = unlocked;
             MainFormInstance.ZoomDrag_Button.Enabled = unlocked;
         }
-        public static void OpenUrl(string url) {
-            try {
+
+        public static void OpenUrl(string url)
+        {
+            try
+            {
                 ProcessStartInfo psi = new() { FileName = url, UseShellExecute = true };
                 Process.Start(psi);
-            } catch (Exception ex) {
+            }
+            catch (Exception ex)
+            {
                 MessageBox.Show("Error opening URL: " + ex.Message);
             }
         }
+
         public static void PlayBeepSound() => System.Media.SystemSounds.Beep.Play();
 
-        public static string FloatToHex(float floatValue) {
+        public static string FloatToHex(float floatValue)
+        {
             byte[] bytes = BitConverter.GetBytes(floatValue);
             return BitConverter.ToString(bytes).Replace("-", " ");
         }
 
-        public static bool TryChangeValue(FloatValue change, float newValue, NumericUpDown? spinner = null) {
-            if (change == null || !ProgramEnabled || !ValuesFound || !ProcessFound)
-                return false;
+        public static bool TryChangeValue(FloatValue change, float newValue, NumericUpDown? spinner = null)
+        {
+            if (change == null || !ProgramEnabled || !ValuesFound || !ProcessFound) return false;
+            return change.Write(newValue);
+        }
 
-            if (change.Write(newValue))
+        public static bool TryChangeZoom(float zoom, NumericUpDown? spinner = null)
+        {
+            if (!ProgramEnabled || ZoomValue == null || !ZoomFound || !ProcessFound) return false;
+
+            if (ZoomValue.Write(zoom))
+            {
                 return true;
+            }
 
+            ZoomFound = false;
+            ZoomValue.UpdateBase(0);
+            UnlockZoomControls(false);
             return false;
         }
 
-        public static bool TryChangeZoom(float zoom, NumericUpDown? spinner = null) {
-            if (!ProgramEnabled || ZoomValue == null || !ZoomFound || !ProcessFound)
-                return false;
-
-            if (ZoomValue.Write(zoom)) {
-            } else {
-                ZoomFound = false;
-                ZoomValue.UpdateBase(0);
-                UnlockZoomControls(false);
-            }
-            return true;
-        }
-
-        public static void TryResetValue(FloatValue change, NumericUpDown? spinner = null) {
-            if (change == null || change.BaseAddress <= 0 || !ProgramEnabled || !ValuesFound || !ProcessFound)
-                return;
+        public static void TryResetValue(FloatValue change, NumericUpDown? spinner = null)
+        {
+            if (change == null || change.BaseAddress <= 0 || !ProgramEnabled
+                || !ValuesFound || !ProcessFound) return;
 
             change.Reset();
 
-            if (spinner != null) {
+            if (spinner != null)
+            {
                 spinner.Value = (decimal)change.Read();
             }
-        }
-
-        public static void TryChangeWithMouseInput(FloatValue change) {
-            Point mousePosition = Control.MousePosition;
-
-            // Convert screen coordinates to client coordinates if necessary
-            //mousePosition = button.PointToClient(Control.MousePosition);
         }
     }
 }

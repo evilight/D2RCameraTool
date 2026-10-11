@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
   <assemblyIdentity version="1.0.0.0" name="MyApplication.app"/>
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v2">
@@ -16,7 +16,11 @@
             Remove this element if your application requires this virtualization for backwards
             compatibility.
         -->
-		<requestedExecutionLevel  level="requireAdministrator" uiAccess="false" />
+		<!-- asInvoker, not requireAdministrator: reading another same-user process needs
+		     no elevation, and forcing UAC blocked the read-only locate path entirely.
+		     SeDebugPrivilege is requested at runtime (see Win32Memory.TryEnableDebugPrivilege);
+		     if the game refuses to open, run the tool as administrator manually. -->
+		<requestedExecutionLevel  level="asInvoker" uiAccess="false" />
       </requestedPrivileges>
     </security>
   </trustInfo>

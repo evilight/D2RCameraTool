@@ -66,7 +66,7 @@ namespace D2RCameraTool
                 LoadSettingsIni();
             }
 
-            screenWidth = (float)Screen.PrimaryScreen.Bounds.Width;
+            screenWidth = (float)(Screen.PrimaryScreen?.Bounds.Width ?? 1920);
             InitHotkeys();
 
             TopMost = TopMost_CheckBox.Checked;
@@ -467,7 +467,7 @@ namespace D2RCameraTool
         }
 
         private void DonateLink_Label_Click(object sender, EventArgs e) {
-            Program.OpenUrl(DonateLink_Label.Text);
+            Program.OpenUrl(DonateLink_Label.Text ?? string.Empty);
         }
 
         private void SaveSettingsIni() {

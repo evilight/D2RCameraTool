@@ -1,16 +1,89 @@
 # D2RCameraTool
 
-Discord: __shizza__ ("shizza" surrounded by double underscores)
+Diablo II: Resurrected — read and modify the camera angles and zoom in memory,
+changing the camera perspective. A Cheat Engine table is included (`D2RCamera.CT`).
 
-Diablo II: Resurrected - mod camera values (angles and zoom) in memory - change camera perspective
-Cheat Engine table included as well (.CT file)
+Original author: Discord `__shizza__`. This fork modernises the tool and makes camera
+location version-independent.
 
-Working as of D2R version 1.6.77312
+> **DO NOT USE IN MULTIPLAYER OR YOU WILL CERTAINLY BE BANNED. FOR SINGLE PLAYER MODE USE ONLY.**
+> D2R ships Warden anti-cheat — the loader module exports
+> `g_warden_aegis_crash_callback_export`. Use offline single player only.
 
-DO NOT USE IN MULTIPLAYER OR YOU WILL CERTAINLY BE BANNED. FOR SINGLE PLAYER MODE USE ONLY.
+## What changed in this fork
 
-This project uses an open source library called Memory.dll found at https://github.com/erfg12/memory.dll/
-I've noticed this library can cause false positives on virus scans.
-If this tool causes a positive result this library is likely why.
+| | Before | Now |
+|---|---|---|
+| Target framework | `net6.0-windows10.0.17763.0` | `net8.0-windows` |
+| Memory access | third-party `Memory.dll` (prebuilt, AV false positives) | own `Win32Memory.cs` P/Invoke layer, no binary dependency |
+| Camera location | one hard-coded 12-byte AOB, broke on every game update | staged locator: exact signature → structural scan → temporal filter → churn ranking |
+| Manifest | `requireAdministrator` (blocked the read-only locate path) | `asInvoker` + best-effort `SeDebugPrivilege` at runtime |
+| Float writes | `float.ToString()` round trip (culture-dependent) | raw `BitConverter` bytes |
+| Headless use | none | `--cli` mode writing a JSON report |
 
-If you have any concerns just use the Cheat Engine table (.CT file) contained within
+### Camera memory layout
+
+Four consecutive `float`s; `base` is the address of **pitch**:
+
+```
+base - 4 : roll     (1.6-era default  0.099046)
+base + 0 : pitch    (1.6-era default -0.892399)
+base + 4 : height   (1.6-era default  0.239118)
+base + 8 : yaw      (1.6-era default  0.369644)   <- this is the view direction
+```
+
+The original Cheat Engine table labels `+4` as `CamYaw` and `+8` as `CamHeight`; the
+tool's own presets (`settings.ini`) disagree and are the correct assignment —
+`+4` is height, `+8` is yaw.
+
+The zoom value is a separate float, at `pattern + 0x32` from the zoom signature,
+with a usable range of roughly `(-0.25, 2.0)`.
+
+### Why the signature had to become adaptive
+
+`D2R.exe`'s `.text` section is **encrypted at rest** (Shannon entropy 8.000 across the
+whole section). The 1.6-era constants therefore cannot be found by scanning the file —
+they only exist once `D2R_loader.dll` (`eidolon_run`, `.eid` payload) has decrypted the
+code in memory. Any hard-coded signature is fragile, so the locator degrades gracefully:
+
+- **Stage A** — the original exact 12-byte signature. Instant, and correct whenever the
+  camera constants are unchanged.
+- **Stage B** — structural scan for camera-shaped float quads over writable memory.
+- **Stage C** — temporal filter: camera *angles* stay constant while the player moves.
+- **Stage D** — ranking by how many fields are byte-identical to the legacy defaults,
+  then by neighbourhood churn (a live game struct churns; stale byte copies do not).
+
+## Building
+
+Requires the .NET 8 SDK.
+
+```
+dotnet build -c Release
+```
+
+## Usage
+
+### GUI
+
+Run `D2RCameraTool.exe`. Enter the process name (`D2R`), wait for "Process found!",
+then the tool locates the camera automatically. Drag with the pan hotkey (default
+`Space`) to orbit, and the zoom hotkey (default `Z`) to zoom.
+
+### Headless locate (diagnostics / re-deriving after a game update)
+
+```
+D2RCameraTool.exe --cli --process D2R --out d2rcamera_scan.json
+D2RCameraTool.exe --cli --pid 12345 --out report.json      # explicit pid
+D2RCameraTool.exe --cli --allow-write --out report.json    # open with write access
+```
+
+CLI mode attaches **read-only** unless `--allow-write` is given. Exit codes:
+`0` found, `1` not found, `2` could not open the process, `3` cancelled.
+
+The JSON report lists the best candidate and the top 50, each with its
+legacy-field match count, churn and score.
+
+## Credits
+
+- Original tool and Cheat Engine table: `ItsShiZZa`
+- Original memory library (now removed): https://github.com/erfg12/memory.dll/

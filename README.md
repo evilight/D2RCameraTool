@@ -125,6 +125,38 @@ Run `D2RCameraTool.exe`. Enter the process name (`D2R`), wait for "Process found
 then the tool locates the camera automatically. Drag with the pan hotkey (default
 `Space`) to orbit, and the zoom hotkey (default `Z`) to zoom.
 
+### WASD camera control
+
+Hold the keys to swing the camera continuously, like a third-person game:
+
+| key | effect |
+|---|---|
+| `A` / `D` | swing the view direction left / right (yaw) |
+| `W` | look toward the ground (pitch down) |
+| `S` | look toward the sky (pitch up) |
+
+Movement is **time-based** (radians per second, `wasd_speed`, default `1.2`), so the feel
+does not change with frame rate or with how often the UI loop happens to run. The keys are
+read with `GetAsyncKeyState` rather than tracked from the keyboard hook, because a hook that
+Windows silently removes after a timeout would leave a direction stuck on forever.
+
+Movement only applies while the game owns the **foreground window** (`wasd_require_focus`),
+so the camera cannot rotate while you are typing somewhere else. The panel shows whether the
+game is currently considered focused — that is the first thing to check if nothing happens.
+
+By default `wasd_block_keys` is on: while the game is focused, W/A/S/D are swallowed by the
+keyboard hook so the game does not also act on them. Only those four keys, and only while
+the game is focused.
+
+**If an axis feels backwards, tick `Invert yaw` or `Invert pitch`.** I could not verify the
+sign of yaw against the live game, so the default direction for A/D is a guess.
+
+Limits: yaw wraps at ±π so it can rotate forever; pitch is clamped to `[-1.55, +0.30]` rad
+(almost straight down, to slightly above horizontal). Both constants are at the top of
+`WasdCameraControl.cs`.
+
+All six settings live in `settings.ini` and are written back when you press Save.
+
 ### Headless locate (diagnostics / re-deriving after a game update)
 
 ```

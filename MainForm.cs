@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 
 namespace D2RCameraTool
 {
@@ -36,6 +37,19 @@ namespace D2RCameraTool
         private float startRoll;
         private float startZoom;
 
+        // ---- WASD camera control ------------------------------------------------
+        internal static readonly WasdCameraControl Wasd = new();
+        private GroupBox WasdGroup = null!;
+        private CheckBox Wasd_CheckBox = null!;
+        private NumericUpDown WasdSpeed_UpDown = null!;
+        private CheckBox WasdInvertYaw_CheckBox = null!;
+        private CheckBox WasdInvertPitch_CheckBox = null!;
+        private CheckBox WasdBlock_CheckBox = null!;
+        private CheckBox WasdFocus_CheckBox = null!;
+        private Label Wasd_Status_Label = null!;
+        private System.Windows.Forms.Timer? wasdTimer;
+        private bool lastFocusState;
+
         public MainForm() {
             InitializeComponent();
             PresetsArray = new CameraPreset[5];
@@ -52,7 +66,133 @@ namespace D2RCameraTool
             GlobalHotkeys.HookKeyboard();
             GlobalHotkeys.KeyPressed += GlobalHotKey_Pressed!;
             GlobalHotkeys.KeyReleased += GlobalHotKey_Released!;
+            // Lets the hook swallow W/A/S/D before the game sees them.
+            GlobalHotkeys.SuppressKey = Wasd.ShouldSuppress;
         }
+
+        /// <summary>
+        /// Builds the WASD panel in code. The designer has no spare space, so the form is
+        /// grown and the status strip pushed down rather than moving existing controls.
+        /// </summary>
+        private void BuildWasdPanel() {
+            // Yaw wraps at +/-pi, which the designer's +/-2 range cannot represent. Without
+            // widening it the spin box would clamp the displayed value and its ValueChanged
+            // handler would then write that clamped value back over the real one.
+            CamPan_UpDown.Minimum = -3.15m;
+            CamPan_UpDown.Maximum = 3.15m;
+
+            const int groupH = 98;
+            const int extra = groupH + 8;
+
+            WasdGroup = new GroupBox {
+                Text = "WASD camera control",
+                Location = new Point(Main_Panel.Left, Main_Panel.Bottom + 6),
+                Size = new Size(Main_Panel.Width, groupH),
+            };
+
+            Wasd_CheckBox = new CheckBox {
+                Text = "Enable WASD", AutoSize = true,
+                Location = new Point(10, 22),
+            };
+            var speedLabel = new Label {
+                Text = "Speed (rad/s)", AutoSize = true,
+                Location = new Point(150, 24),
+            };
+            WasdSpeed_UpDown = new NumericUpDown {
+                Location = new Point(248, 21), Width = 70,
+                DecimalPlaces = 2, Increment = 0.1m,
+                Minimum = 0.05m, Maximum = 10m,
+                Value = (decimal)WasdCameraControl.DefaultSpeed,
+            };
+            WasdBlock_CheckBox = new CheckBox {
+                Text = "Block W/A/S/D from the game", AutoSize = true,
+                Location = new Point(340, 22),
+            };
+
+            WasdInvertYaw_CheckBox = new CheckBox {
+                Text = "Invert yaw (A/D)", AutoSize = true,
+                Location = new Point(10, 48),
+            };
+            WasdInvertPitch_CheckBox = new CheckBox {
+                Text = "Invert pitch (W/S)", AutoSize = true,
+                Location = new Point(150, 48),
+            };
+            WasdFocus_CheckBox = new CheckBox {
+                Text = "Only while the game has focus", AutoSize = true,
+                Location = new Point(300, 48),
+            };
+
+            Wasd_Status_Label = new Label {
+                AutoSize = false,
+                Location = new Point(10, 72),
+                Size = new Size(Main_Panel.Width - 30, 18),
+            };
+
+            WasdGroup.Controls.AddRange(new Control[] {
+                Wasd_CheckBox, speedLabel, WasdSpeed_UpDown, WasdBlock_CheckBox,
+                WasdInvertYaw_CheckBox, WasdInvertPitch_CheckBox, WasdFocus_CheckBox,
+                Wasd_Status_Label,
+            });
+
+            ClientSize = new Size(ClientSize.Width, ClientSize.Height + extra);
+            statusStrip1.Top += extra;
+            Controls.Add(WasdGroup);
+
+            Wasd_CheckBox.CheckedChanged += (_, _) => { Wasd.Enabled = Wasd_CheckBox.Checked; UpdateWasdStatus(); };
+            WasdSpeed_UpDown.ValueChanged += (_, _) => Wasd.SpeedRadPerSec = (double)WasdSpeed_UpDown.Value;
+            WasdInvertYaw_CheckBox.CheckedChanged += (_, _) => Wasd.InvertYaw = WasdInvertYaw_CheckBox.Checked;
+            WasdInvertPitch_CheckBox.CheckedChanged += (_, _) => Wasd.InvertPitch = WasdInvertPitch_CheckBox.Checked;
+            WasdBlock_CheckBox.CheckedChanged += (_, _) => Wasd.BlockKeys = WasdBlock_CheckBox.Checked;
+            WasdFocus_CheckBox.CheckedChanged += (_, _) => { Wasd.RequireGameFocus = WasdFocus_CheckBox.Checked; UpdateWasdStatus(); };
+
+            ApplyWasdToUi();
+            UpdateWasdStatus();
+        }
+
+        /// <summary>Pushes the control's settings into the widgets (used after loading the ini).</summary>
+        private void ApplyWasdToUi() {
+            Wasd_CheckBox.Checked = Wasd.Enabled;
+            WasdSpeed_UpDown.Value = (decimal)Math.Clamp(Wasd.SpeedRadPerSec,
+                (double)WasdSpeed_UpDown.Minimum, (double)WasdSpeed_UpDown.Maximum);
+            WasdInvertYaw_CheckBox.Checked = Wasd.InvertYaw;
+            WasdInvertPitch_CheckBox.Checked = Wasd.InvertPitch;
+            WasdBlock_CheckBox.Checked = Wasd.BlockKeys;
+            WasdFocus_CheckBox.Checked = Wasd.RequireGameFocus;
+        }
+
+        private void UpdateWasdStatus() {
+            if (Wasd_Status_Label is null) return;
+            string focus = Program.ProcessFound
+                ? (Wasd.GameFocused ? "game focused - active" : "game not focused - idle")
+                : "no process attached";
+            Wasd_Status_Label.Text =
+                $"A/D = view direction (yaw)    W = look down    S = look up    [{focus}]";
+        }
+
+        /// <summary>
+        /// Called by the WASD tick. The spinner's change handler is detached around the
+        /// assignment because it writes straight back to game memory.
+        /// </summary>
+        internal void SetYawDisplay(float value) {
+            CamPan_UpDown.ValueChanged -= CamPan_UpDown_ValueChanged!;
+            try {
+                CamPan_UpDown.Value = ClampToRange(CamPan_UpDown, (decimal)value);
+            } finally {
+                CamPan_UpDown.ValueChanged += CamPan_UpDown_ValueChanged!;
+            }
+        }
+
+        internal void SetPitchDisplay(float value) {
+            PitchSpinner.ValueChanged -= PitchSpinner_ValueChanged!;
+            try {
+                PitchSpinner.Value = ClampToRange(PitchSpinner, (decimal)value);
+            } finally {
+                PitchSpinner.ValueChanged += PitchSpinner_ValueChanged!;
+            }
+        }
+
+        private static decimal ClampToRange(NumericUpDown box, decimal value) =>
+            value < box.Minimum ? box.Minimum : value > box.Maximum ? box.Maximum : value;
 
         private void DestroyHotkeys() {
             GlobalHotkeys.UnhookKeyboard();
@@ -78,6 +218,9 @@ namespace D2RCameraTool
             }
 
             screenWidth = (float)(Screen.PrimaryScreen?.Bounds.Width ?? 1920);
+
+            // After LoadSettingsIni so the loaded WASD settings reach the widgets.
+            BuildWasdPanel();
             InitHotkeys();
 
             TopMost = TopMost_CheckBox.Checked;
@@ -88,7 +231,24 @@ namespace D2RCameraTool
             Application.Idle += Program.Idle_Tick!;
             Program.FormShown_Callback();
 
+            // A dedicated ~60 Hz timer rather than Application.Idle: the WASD feel depends on
+            // a steady cadence, and Idle only fires when the message queue happens to drain.
+            wasdTimer = new System.Windows.Forms.Timer { Interval = 16 };
+            wasdTimer.Tick += Wasd_Tick!;
+            wasdTimer.Start();
+
             TopMost = TopMost_CheckBox.Checked;
+            UpdateWasdStatus();
+        }
+
+        private void Wasd_Tick(object sender, EventArgs e) {
+            int pid = Program.ProcessFound && Program.MemLib.IsOpen ? Program.MemLib.ProcessId : 0;
+            Wasd.Tick(pid);
+
+            if (Wasd.GameFocused != lastFocusState) {
+                lastFocusState = Wasd.GameFocused;
+                UpdateWasdStatus();
+            }
         }
 
         private void TopMost_CheckedChanged(object sender, EventArgs e) {
@@ -256,7 +416,7 @@ namespace D2RCameraTool
                 }
             }
             if (CamPan_CheckBox.Checked) {
-                float camPanResult = SmoothTransform(delta, Program.CamPanValue.Read(), -2.0f, 2.0f, mouseSensitivity);
+                float camPanResult = SmoothTransform(delta, Program.CamPanValue.Read(), -3.15f, 3.15f, mouseSensitivity);
                 if (Program.TryChangeValue(Program.CamPanValue, camPanResult, CamPan_UpDown)) {
                     CamPan_UpDown.ValueChanged -= CamPan_UpDown_ValueChanged!;
                     CamPan_UpDown.Value = (decimal)camPanResult;
@@ -486,10 +646,20 @@ namespace D2RCameraTool
                 return;
 
             Dictionary<string, string> data = new Dictionary<string, string>();
-            data["sensitivity"] = mouseSensitivity.ToString();
+            // Invariant culture throughout: the default formatting of a float follows the
+            // user's locale, so a comma-decimal locale would write values the parser below
+            // could not read back.
+            data["sensitivity"] = mouseSensitivity.ToString(CultureInfo.InvariantCulture);
             data["zoom_hotkey"] = MouseZoomHotKey.ToString();
             data["pan_hotkey"] = MousePanHotKey.ToString();
-            data["throttle"] = throttleDelay.ToString();
+            data["throttle"] = throttleDelay.ToString(CultureInfo.InvariantCulture);
+
+            data["wasd_enabled"] = Wasd.Enabled ? "1" : "0";
+            data["wasd_speed"] = Wasd.SpeedRadPerSec.ToString(CultureInfo.InvariantCulture);
+            data["wasd_invert_yaw"] = Wasd.InvertYaw ? "1" : "0";
+            data["wasd_invert_pitch"] = Wasd.InvertPitch ? "1" : "0";
+            data["wasd_block_keys"] = Wasd.BlockKeys ? "1" : "0";
+            data["wasd_require_focus"] = Wasd.RequireGameFocus ? "1" : "0";
 
             for (int i=0; i<PresetsArray.Length; i++) {
                 float[] preset = { PresetsArray[i].Sensitivity, PresetsArray[i].Pitch, PresetsArray[i].Yaw, PresetsArray[i].Roll, PresetsArray[i].Height, PresetsArray[i].Zoom };
@@ -510,7 +680,7 @@ namespace D2RCameraTool
             foreach (var pair in data) {
                 switch (pair.Key) {
                     case "sensitivity":
-                        if (float.TryParse(pair.Value, out var result)) {
+                        if (TryParseInvariant(pair.Value, out float result)) {
                             Sensitivity_UpDown.Value = (decimal)result;
                             mouseSensitivity = result;
                         }
@@ -531,6 +701,25 @@ namespace D2RCameraTool
                         break;
                     case "throttle":
                         UpdateDelay_TextBox.Text = pair.Value;
+                        break;
+                    case "wasd_enabled":
+                        Wasd.Enabled = pair.Value == "1";
+                        break;
+                    case "wasd_speed":
+                        if (TryParseInvariant(pair.Value, out double speed) && speed > 0)
+                            Wasd.SpeedRadPerSec = speed;
+                        break;
+                    case "wasd_invert_yaw":
+                        Wasd.InvertYaw = pair.Value == "1";
+                        break;
+                    case "wasd_invert_pitch":
+                        Wasd.InvertPitch = pair.Value == "1";
+                        break;
+                    case "wasd_block_keys":
+                        Wasd.BlockKeys = pair.Value == "1";
+                        break;
+                    case "wasd_require_focus":
+                        Wasd.RequireGameFocus = pair.Value == "1";
                         break;
                     case "preset1":
                         preset = StringToFloats(pair.Value);
@@ -570,11 +759,17 @@ namespace D2RCameraTool
 
         }
 
+        private static bool TryParseInvariant(string text, out double value) =>
+            double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out value);
+
+        private static bool TryParseInvariant(string text, out float value) =>
+            float.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out value);
+
         public static float[] StringToFloats(string str) {
             string[] parts = str.Split(',');
             float[] values = new float[parts.Length];
             for (int i = 0; i < parts.Length; i++) {
-                if (float.TryParse(parts[i], out float value)) {
+                if (TryParseInvariant(parts[i], out float value)) {
                     values[i] = value;
                 } else {
                     throw new ArgumentException("Invalid float value in the input string.");
@@ -582,7 +777,8 @@ namespace D2RCameraTool
             }
             return values;
         }
-        private static string JoinFloats(float[] values) => string.Join(",", values);
+        private static string JoinFloats(float[] values) =>
+            string.Join(",", values.Select(v => v.ToString(CultureInfo.InvariantCulture)));
 
     }
 }

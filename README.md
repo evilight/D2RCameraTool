@@ -151,9 +151,10 @@ the game is focused.
 **If an axis feels backwards, tick `Invert yaw` or `Invert pitch`.** I could not verify the
 sign of yaw against the live game, so the default direction for A/D is a guess.
 
-Limits: yaw wraps at ±π so it can rotate forever; pitch is clamped to `[-1.55, +0.30]` rad
-(almost straight down, to slightly above horizontal). Both constants are at the top of
-`WasdCameraControl.cs`.
+Limits: yaw is CLAMPED at ±π — it stops at the limit rather than wrapping round to the other
+end, because the wrap read as the view snapping. Pitch is clamped to `[-1.55, +0.30]` rad
+(almost straight down, to slightly above horizontal). Both live at the top of
+`WasdCameraControl.cs` and are shared by the WASD keys and the mouse-drag path.
 
 All six settings live in `settings.ini` and are written back when you press Save.
 

@@ -79,11 +79,11 @@ namespace D2RCameraTool
         /// grown and the status strip pushed down rather than moving existing controls.
         /// </summary>
         private void BuildWasdPanel() {
-            // Yaw wraps at +/-pi, which the designer's +/-2 range cannot represent. Without
-            // widening it the spin box would clamp the displayed value and its ValueChanged
-            // handler would then write that clamped value back over the real one.
-            CamPan_UpDown.Minimum = -3.15m;
-            CamPan_UpDown.Maximum = 3.15m;
+            // Yaw is clamped at +/-pi by every input path, so the spin box must be able to
+            // represent that limit. Without widening it the box would clamp the displayed value
+            // and its ValueChanged handler would then write that clamped value over the real one.
+            CamPan_UpDown.Minimum = (decimal)WasdCameraControl.YawMin;
+            CamPan_UpDown.Maximum = (decimal)WasdCameraControl.YawMax;
 
             const int groupH = 98;
             const int extra = groupH + 8;
@@ -436,7 +436,8 @@ namespace D2RCameraTool
                 }
             }
             if (CamPan_CheckBox.Checked) {
-                float camPanResult = SmoothTransform(delta, Program.CamPanValue.Read(), -3.15f, 3.15f, mouseSensitivity);
+                float camPanResult = SmoothTransform(delta, Program.CamPanValue.Read(),
+                    (float)WasdCameraControl.YawMin, (float)WasdCameraControl.YawMax, mouseSensitivity);
                 if (Program.TryChangeValue(Program.CamPanValue, camPanResult, CamPan_UpDown)) {
                     CamPan_UpDown.ValueChanged -= CamPan_UpDown_ValueChanged!;
                     CamPan_UpDown.Value = (decimal)camPanResult;

@@ -19,9 +19,13 @@ internal sealed class WasdCameraControl
     /// <summary>Radians per second at the default speed setting.</summary>
     public const double DefaultSpeed = 1.2;
 
-    // Yaw wraps, so it can rotate forever. Pitch is clamped to a range that keeps the camera
-    // above the ground: -1.55 rad is almost straight down, +0.30 lifts it to look slightly up.
-    // These are the only two numbers to tune if the range feels wrong in game.
+    // Yaw is CLAMPED at +/-pi rather than wrapped. Wrapping made the value jump from +3.14 to
+    // -3.14, which reads as the view snapping round; stopping at the limit is the wanted
+    // behaviour. Pitch is clamped to a range that keeps the camera above the ground: -1.55 rad
+    // is almost straight down, +0.30 lifts it to look slightly up. These are the only numbers
+    // to tune if a limit feels wrong in game.
+    public const double YawMin = -Math.PI;
+    public const double YawMax = Math.PI;
     public const double PitchMin = -1.55;
     public const double PitchMax = 0.30;
 
@@ -156,7 +160,7 @@ internal sealed class WasdCameraControl
 
         if (yawStep != 0 && Program.CamPanValue.BaseAddress > 0)
         {
-            float next = WrapToPi(Program.CamPanValue.Read() + (float)yawStep);
+            float next = (float)Math.Clamp(Program.CamPanValue.Read() + yawStep, YawMin, YawMax);
             if (Program.TryChangeValue(Program.CamPanValue, next))
             {
                 Program.MainFormInstance.SetYawDisplay(next);
@@ -175,14 +179,5 @@ internal sealed class WasdCameraControl
         }
 
         return wrote;
-    }
-
-    /// <summary>Keeps yaw in (-pi, pi] so a long hold cannot drift into a huge float.</summary>
-    private static float WrapToPi(float radians)
-    {
-        const float TwoPi = (float)(Math.PI * 2);
-        while (radians > Math.PI) radians -= TwoPi;
-        while (radians <= -Math.PI) radians += TwoPi;
-        return radians;
     }
 }

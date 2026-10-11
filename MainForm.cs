@@ -67,7 +67,14 @@ namespace D2RCameraTool
 
             IniFile = new AppConfig(INI_FILE_NAME);
             if (IniFile != null) {
-                LoadSettingsIni();
+                // A malformed value (e.g. a bad key name in pan_hotkey) made Enum.Parse throw
+                // out of Form1_Load and left the tool half-initialised. Config must never be
+                // able to stop the app from starting.
+                try {
+                    LoadSettingsIni();
+                } catch (Exception ex) {
+                    System.Diagnostics.Debug.WriteLine("settings.ini ignored: " + ex.Message);
+                }
             }
 
             screenWidth = (float)(Screen.PrimaryScreen?.Bounds.Width ?? 1920);

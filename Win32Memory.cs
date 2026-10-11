@@ -41,6 +41,16 @@ internal sealed class Win32Memory : IDisposable
     /// <summary>Win32 error from the most recent OpenProcess call.</summary>
     public int LastOpenError { get; private set; }
 
+    /// <summary>
+    /// Human-readable reason for the last failed OpenByName. Without this the GUI sat on its
+    /// initial status text forever and looked hung, giving no clue whether the game was
+    /// missing, the name was wrong, or access was refused.
+    /// </summary>
+    public string LastLookupNote { get; private set; } = string.Empty;
+
+    /// <summary>Number of processes the most recent enumeration returned.</summary>
+    public int LastEnumerateCount { get; private set; }
+
     public int ProcessId { get; private set; }
     public bool IsOpen => _handle != IntPtr.Zero;
     public string ProcessName { get; private set; } = string.Empty;
@@ -62,18 +72,29 @@ internal sealed class Win32Memory : IDisposable
         // default and the managed API use the bare name. Compare against both, otherwise
         // the native walk silently never matches and every call falls through to the slower
         // managed path.
-        var pids = EnumerateProcesses()
+        var all = EnumerateProcesses();
+        LastEnumerateCount = all.Count;
+        var pids = all
             .Where(p => string.Equals(p.name, bare, StringComparison.OrdinalIgnoreCase)
                      || string.Equals(p.name, bare + ".exe", StringComparison.OrdinalIgnoreCase))
             .Select(p => p.pid)
             .ToList();
-        Trace?.Invoke($"Toolhelp32: '{bare}' -> {pids.Count} process(es) [{string.Join(",", pids)}]");
+
+        if (all.Count == 0)
+            LastLookupNote = "no processes enumerated (host restricts visibility)";
+        else if (pids.Count == 0)
+            LastLookupNote = $"'{bare}' not among {all.Count} processes";
+        else
+            LastLookupNote = $"'{bare}' matches pid {string.Join(",", pids)}";
+
+        Trace?.Invoke($"Toolhelp32: {LastLookupNote}");
 
         foreach (var pid in pids)
         {
             if (Open(pid, writeAccess))
             {
                 ProcessName = bare;
+                LastLookupNote = $"attached pid {pid}";
                 return true;
             }
         }
@@ -83,11 +104,18 @@ internal sealed class Win32Memory : IDisposable
         {
             var procs = System.Diagnostics.Process.GetProcessesByName(bare);
             Trace?.Invoke($"fallback GetProcessesByName('{bare}') -> {procs.Length}");
+            if (procs.Length > 0)
+                LastLookupNote = $"Toolhelp32 missed it, managed API matched {procs.Length}";
             try
             {
                 foreach (var p in procs)
                 {
-                    if (Open(p.Id, writeAccess)) { ProcessName = p.ProcessName; return true; }
+                    if (Open(p.Id, writeAccess))
+                    {
+                        ProcessName = p.ProcessName;
+                        LastLookupNote = $"attached pid {p.Id} (managed API)";
+                        return true;
+                    }
                 }
             }
             finally
@@ -95,6 +123,11 @@ internal sealed class Win32Memory : IDisposable
                 foreach (var p in procs) p.Dispose();
             }
         }
+
+        if (pids.Count > 0 || LastEnumerateCount > 0)
+            LastLookupNote += LastOpenError == 5
+                ? " - OpenProcess denied (err 5), try running as administrator"
+                : $" - OpenProcess failed (err {LastOpenError})";
         return false;
     }
 

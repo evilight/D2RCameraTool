@@ -11,6 +11,14 @@ namespace D2RCameraTool
 
         public static bool ProgramEnabled = true;
         public static bool ProcessFound;
+
+        /// <summary>
+        /// False when the process could only be opened read-only. Detection must not require
+        /// write access: an anti-cheat protected game frequently allows PROCESS_VM_READ and
+        /// refuses PROCESS_VM_WRITE, and demanding write access up front made such a game
+        /// look absent, leaving the status label stuck on its initial text forever.
+        /// </summary>
+        public static bool WriteAccessAvailable = true;
         public static bool IsAngleScanning;
         public static bool IsZoomScanning;
         public static bool ValuesFound;
@@ -200,7 +208,14 @@ namespace D2RCameraTool
         // ------------------------------------------------------------ GUI plumbing
 
         public static void EnableChecked() => ProgramEnabled = true;
-        public static void EnableUnchecked() => ProgramEnabled = false;
+
+        public static void EnableUnchecked()
+        {
+            ProgramEnabled = false;
+            // Say so: with the master switch off the status label never changes, which is
+            // indistinguishable from a hung scan.
+            Report("Disabled - tick the checkbox to start scanning");
+        }
 
         public static void FormShown_Callback() => Init();
 
@@ -225,16 +240,60 @@ namespace D2RCameraTool
         {
             if (!ProgramEnabled || ProcessFound) return;
 
-            string process = MainFormInstance.ProcessName_Text.Text;
-            if (string.IsNullOrWhiteSpace(process)) return;
+            string process = (MainFormInstance.ProcessName_Text.Text ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(process))
+            {
+                Report("Type a process name, e.g. D2R.exe");
+                return;
+            }
 
-            if (MemLib.OpenByName(process))
+            // Try full access first, then fall back to read-only. Locating the camera only
+            // needs read access, so a write refusal must not look like "process not found".
+            if (MemLib.OpenByName(process, writeAccess: true))
             {
                 ProcessFound = true;
+                WriteAccessAvailable = true;
                 MainFormInstance.ProcessName_Text.Enabled = false;
-                MainFormInstance.Status_Label.Text = "Process found!";
+                Report($"Process found! pid {MemLib.ProcessId} (read/write)");
                 PlayBeepSound();
             }
+            else if (MemLib.OpenByName(process, writeAccess: false))
+            {
+                ProcessFound = true;
+                WriteAccessAvailable = false;
+                MainFormInstance.ProcessName_Text.Enabled = false;
+                Report($"Process found pid {MemLib.ProcessId}, READ-ONLY - "
+                       + "camera can be located but not modified "
+                       + $"(write refused: {(MemLib.LastOpenError == 5 ? "access denied" : "err " + MemLib.LastOpenError)})");
+                PlayBeepSound();
+            }
+            else
+            {
+                // Previously this returned silently, so the label sat on its initial text
+                // forever and the tool looked hung. Always say why.
+                Report($"Waiting for '{process}': {MemLib.LastLookupNote}");
+            }
+        }
+
+        /// <summary>
+        /// Updates the status label and appends the same line to d2rcamera.log next to the
+        /// executable, so a failure can be reported without reading the UI over someone's
+        /// shoulder.
+        /// </summary>
+        private static void Report(string message)
+        {
+            try
+            {
+                MainFormInstance.Status_Label.Text = message;
+            }
+            catch { /* the label is best-effort */ }
+
+            try
+            {
+                string log = Path.Combine(AppContext.BaseDirectory, "d2rcamera.log");
+                File.AppendAllText(log, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss}  {message}{Environment.NewLine}");
+            }
+            catch { /* logging must never take the app down */ }
         }
 
         public static async void ValueScan_Tick()
@@ -243,7 +302,7 @@ namespace D2RCameraTool
             IsAngleScanning = true;
 
             var log = new StringBuilder();
-            MainFormInstance.Status_Label.Text = "Searching for camera values...";
+            Report("Searching for camera values...");
 
             LocateResult res;
             try
@@ -253,13 +312,19 @@ namespace D2RCameraTool
             }
             catch (Exception ex)
             {
-                MainFormInstance.Status_Label.Text = "Scan failed: " + ex.Message;
+                Report("Scan failed: " + ex.Message);
                 IsAngleScanning = false;
                 return;
             }
             finally
             {
                 LastScanLog = log.ToString();
+                try
+                {
+                    File.AppendAllText(Path.Combine(AppContext.BaseDirectory, "d2rcamera.log"),
+                        log.ToString());
+                }
+                catch { /* ignore */ }
             }
 
             if (res.Found && res.Best is not null)
@@ -268,14 +333,12 @@ namespace D2RCameraTool
                 PlayBeepSound();
                 RefreshValues((long)res.Best.Base);
                 UnlockValueControls();
-                MainFormInstance.Status_Label.Text =
-                    $"Found via {res.Method} at 0x{res.Best.Base:X} "
-                    + $"(legacy {res.Best.LegacyExactFields}/4, churn {res.Best.Churn})";
+                Report($"Found via {res.Method} at 0x{res.Best.Base:X} "
+                       + $"(legacy {res.Best.LegacyExactFields}/4, churn {res.Best.Churn})");
             }
             else
             {
-                MainFormInstance.Status_Label.Text =
-                    "Camera values not found - see status log, try again in-game";
+                Report("Camera values not found - enter a level and try again");
             }
 
             IsAngleScanning = false;
@@ -307,7 +370,7 @@ namespace D2RCameraTool
             if (!ProgramEnabled || ZoomFound || !ValuesFound || IsZoomScanning || !ProcessFound) return;
             IsZoomScanning = true;
 
-            MainFormInstance.Status_Label.Text = "Searching for zoom value...";
+            Report("Searching for zoom value...");
             ulong hit = 0;
             try
             {
@@ -320,7 +383,7 @@ namespace D2RCameraTool
             }
             catch (Exception ex)
             {
-                MainFormInstance.Status_Label.Text = "Zoom scan failed: " + ex.Message;
+                Report("Zoom scan failed: " + ex.Message);
                 IsZoomScanning = false;
                 return;
             }
@@ -331,13 +394,13 @@ namespace D2RCameraTool
                 ZoomValue.UpdateBase((long)zoomBase);
                 ZoomFound = true;
                 PlayBeepSound();
-                MainFormInstance.Status_Label.Text = "Zoom found at: 0x" + zoomBase.ToString("X");
+                Report("Zoom found at: 0x" + zoomBase.ToString("X"));
                 UnlockZoomControls();
                 MainFormInstance.Zoom_UpDown.Value = (decimal)ZoomValue.Read();
             }
             else
             {
-                MainFormInstance.Status_Label.Text = "Zoom value not found";
+                Report("Zoom value not found");
             }
 
             IsZoomScanning = false;
@@ -410,12 +473,22 @@ namespace D2RCameraTool
         public static bool TryChangeValue(FloatValue change, float newValue, NumericUpDown? spinner = null)
         {
             if (change == null || !ProgramEnabled || !ValuesFound || !ProcessFound) return false;
+            if (!WriteAccessAvailable)
+            {
+                Report("Attached read-only - cannot modify. Run the tool as administrator.");
+                return false;
+            }
             return change.Write(newValue);
         }
 
         public static bool TryChangeZoom(float zoom, NumericUpDown? spinner = null)
         {
             if (!ProgramEnabled || ZoomValue == null || !ZoomFound || !ProcessFound) return false;
+            if (!WriteAccessAvailable)
+            {
+                Report("Attached read-only - cannot modify zoom. Run the tool as administrator.");
+                return false;
+            }
 
             if (ZoomValue.Write(zoom))
             {

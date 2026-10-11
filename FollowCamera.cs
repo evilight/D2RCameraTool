@@ -38,6 +38,7 @@ internal sealed class FollowCamera
     private bool _haveLast;
     private double _direction;
     private bool _haveDirection;
+    private bool _loggedRoll;
 
     public double Direction => _direction;
     public double LastYawWritten { get; private set; }
@@ -113,6 +114,26 @@ internal sealed class FollowCamera
         {
             Active = false;
             return false;
+        }
+
+        // A follow camera should be level. The isometric view carries a deliberate 5.7 degree roll
+        // (0.099046 rad) that reads as the ground tilting once the camera sits behind the
+        // character, so it is held at zero while following. Re-asserted rather than written once
+        // because the engine restores its own camera from time to time.
+        if (Program.RollValue.BaseAddress > 0)
+        {
+            float roll = Program.RollValue.Read();
+            if (Math.Abs(roll) > 0.0005f)
+            {
+                Program.TryChangeValue(Program.RollValue, 0f);
+                if (!_loggedRoll)
+                {
+                    _loggedRoll = true;
+                    Program.LogLine($"Follow: holding roll at 0 (was {roll:F6}; the isometric view's "
+                                    + "5.7 degree tilt reads as the ground leaning once the camera "
+                                    + "is behind the character)");
+                }
+            }
         }
 
         LastYawWritten = target;

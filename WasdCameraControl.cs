@@ -106,12 +106,18 @@ internal sealed class WasdCameraControl
     private double _rateWindowStartMs;
     public double MeasuredHz { get; private set; }
 
-    // Post-release revert watch. How long to keep checking after the last write.
-    private const double RevertWatchMs = 4000;
+    // Post-release revert watch. How long to keep checking after the last write, and how often
+    // to sample. The window is long because the observed restoration took ~3.5 s, which is far
+    // too slow to be a per-frame recompute.
+    private const double RevertWatchMs = 25000;
+    private const double SampleEveryMs = 250;
+    private const int SampleKeep = 24;
     private bool _watchArmed;
     private double _watchStartMs;
+    private double _nextSampleMs;
     private float _watchYaw;
     private bool _watchReported;
+    private readonly List<string> _watchSamples = new();
 
     public bool GameFocused => _gameFocused;
     public bool AnyKeyHeld { get; private set; }
@@ -305,6 +311,11 @@ internal sealed class WasdCameraControl
     /// This is the case the in-hold counter could not see: it only ran while a key was held,
     /// which is exactly when the engine is NOT restoring. The reported symptom - the view
     /// follows while held and returns to its old position on release - is what this detects.
+    ///
+    /// It samples rather than just checking once, because "the view came back" could be an
+    /// instant overwrite or a gradual interpolation back to a default, and those need opposite
+    /// fixes. It also samples the mirror copy, since whichever of the two moves FIRST is the
+    /// upstream one and therefore the one worth writing.
     /// </summary>
     private void WatchForRevert()
     {
@@ -318,18 +329,36 @@ internal sealed class WasdCameraControl
             _watchStartMs = nowMs;
             _watchYaw = _lastYawWritten;
             _watchReported = false;
+            _watchSamples.Clear();
+            _nextSampleMs = 0;
             return;
         }
 
         if (_watchReported || nowMs - _watchStartMs > RevertWatchMs) return;
 
+        double rel = nowMs - _watchStartMs;
+        if (rel < _nextSampleMs) return;
+        _nextSampleMs = rel + SampleEveryMs;
+
         float cur = Program.CamPanValue.Read();
+        _watchSamples.Add($"{rel:F0}:best={cur:F5},mirror={ReadMirrorYaw():F5}");
+        if (_watchSamples.Count > SampleKeep) _watchSamples.RemoveAt(0);
+
         if (Math.Abs(cur - _watchYaw) <= 1e-6f) return;
 
         _watchReported = true;
         Program.LogLine(
-            $"WASD yaw REVERTED {nowMs - _watchStartMs:F0} ms after the last write: "
-            + $"we left {_watchYaw:F6}, memory now {cur:F6}. "
-            + "The engine rebuilt the camera, so the value we write is restored rather than kept.");
+            $"WASD yaw CHANGED {rel:F0} ms after the last write: we left {_watchYaw:F6}, now {cur:F6}. "
+            + $"Timeline (ms:best,mirror): {string.Join(" | ", _watchSamples)}");
+    }
+
+    private static float ReadMirrorYaw()
+    {
+        foreach (long m in Program.CameraMirrors)
+        {
+            var v = Program.MemLib.ReadFloat((ulong)(m + 0x8));
+            if (v.HasValue) return v.Value;
+        }
+        return float.NaN;
     }
 }

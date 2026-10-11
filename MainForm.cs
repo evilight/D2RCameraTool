@@ -38,8 +38,7 @@ namespace D2RCameraTool
         private float startZoom;
 
         // ---- WASD camera control ------------------------------------------------
-        internal static readonly WasdCameraControl Wasd = new();
-        private GroupBox WasdGroup = null!;
+        internal static readonly WasdCameraControl Wasd = new();        private GroupBox WasdGroup = null!;
         private CheckBox Wasd_CheckBox = null!;
         private NumericUpDown WasdSpeed_UpDown = null!;
         private CheckBox WasdInvertYaw_CheckBox = null!;
@@ -62,6 +61,11 @@ namespace D2RCameraTool
 
         public MainForm() {
             InitializeComponent();
+
+            // Created here, on the UI thread, so cues from a worker thread only ever need a
+            // BeginInvoke rather than a cross-thread form construction.
+            Program.Cue = new CueOverlay();
+
             PresetsArray = new CameraPreset[5];
             for (int i = 0; i < PresetsArray.Length; i++) {
                 PresetsArray[i] = new CameraPreset();

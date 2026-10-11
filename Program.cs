@@ -39,6 +39,34 @@ namespace D2RCameraTool
         [STAThread]
         static int Main(string[] args)
         {
+            // Handled before anything else. This was twice misplaced: first after the attach in
+            // RunCli, which returns early when it cannot open the game, and then in RunCli at all,
+            // when without --cli the arguments fall through to the GUI branch below and the banner
+            // is never shown. Both times the test looked like the overlay was broken.
+            if (args.Any(a => a.Equals("--cue-test", StringComparison.OrdinalIgnoreCase)))
+            {
+                int secs = int.TryParse(ArgValue(args, "--cue-seconds"), out int cs) ? cs : 6;
+                var banner = new CueOverlay();
+                banner.Cue("CUE TEST - can you see this?", System.Drawing.Color.Lime);
+                var until = DateTime.UtcNow.AddSeconds(secs);
+                int last = -1;
+                while (DateTime.UtcNow < until)
+                {
+                    int left = (int)Math.Ceiling((until - DateTime.UtcNow).TotalSeconds);
+                    if (left != last)
+                    {
+                        last = left;
+                        banner.Cue($"CUE TEST - HOLD D ... {left}", System.Drawing.Color.Lime);
+                        try { Beep(700, 120); } catch { }
+                    }
+                    Application.DoEvents();
+                    Thread.Sleep(40);
+                }
+                banner.Clear();
+                Console.WriteLine($"cue-test: banner shown for {secs}s");
+                return 0;
+            }
+
             if (args.Any(a => a.Equals("--cli", StringComparison.OrdinalIgnoreCase)))
             {
                 return RunCli(args);
@@ -141,7 +169,7 @@ namespace D2RCameraTool
                 log = log.ToString().Split('\n'),
             };
 
-            // Optional write probe: the only fully conclusive test of "is this the camera"
+
             // is to move it and see the view move. Requires --allow-write.
             string? probeArg = ArgValue(args, "--probe");
             if (probeArg is not null)
@@ -599,6 +627,21 @@ namespace D2RCameraTool
         [System.Runtime.InteropServices.DllImport("kernel32.dll")]
         private static extern bool Beep(uint frequency, uint duration);
 
+        /// <summary>On-screen instruction banner, created once on the UI thread.</summary>
+        public static CueOverlay? Cue;
+
+        private static int _lastCueSecond = -1;
+
+        /// <summary>
+        /// Shows a cue over the game and beeps alongside it. The beep is a bonus, not the signal:
+        /// nothing was audible in testing, most likely because the game holds the audio device.
+        /// </summary>
+        private static void CueAndBeep(string text, System.Drawing.Color colour, uint hz)
+        {
+            Cue?.Cue(text, colour);
+            try { Beep(hz, 140); } catch { }
+        }
+
         /// <summary>
         /// Measures the rate the yaw value actually changes at, in radians per second.
         ///
@@ -625,23 +668,35 @@ namespace D2RCameraTool
             }
 
             log($"rate: starting in {settleSeconds}s. Switch to the game and HOLD D (or A) until "
-                + $"the beeping stops, about {settleSeconds + sampleSeconds} seconds in all.");
+                + $"the banner says to let go.");
 
             for (int i = settleSeconds; i > 0; i--)
             {
-                Beep(600, 120);
+                CueAndBeep($"get ready... {i}", System.Drawing.Color.White, 600);
                 Thread.Sleep(1000);
             }
-            Beep(900, 250);   // start
+
+            CueAndBeep("HOLD  D  NOW", System.Drawing.Color.Lime, 1000);
 
             var clock = System.Diagnostics.Stopwatch.StartNew();
             var samples = new List<(double ms, float yaw)>();
             while (clock.Elapsed.TotalSeconds < sampleSeconds)
             {
                 samples.Add((clock.Elapsed.TotalMilliseconds, CamPanValue.Read()));
+                // Keep the banner counting down so it is obvious the measurement is running.
+                int left = sampleSeconds - (int)clock.Elapsed.TotalSeconds;
+                if (left != _lastCueSecond)
+                {
+                    _lastCueSecond = left;
+                    Cue?.Cue($"HOLD  D  ...  {left}", System.Drawing.Color.Lime);
+                }
                 Thread.Sleep(40);
             }
-            Beep(900, 250);   // stop
+            _lastCueSecond = -1;
+
+            CueAndBeep("RELEASE", System.Drawing.Color.Orange, 500);
+            Thread.Sleep(1200);
+            Cue?.Clear();
 
             if (samples.Count < 5)
             {

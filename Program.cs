@@ -155,6 +155,9 @@ namespace D2RCameraTool
             /// <summary>Cap on dumped hits - a non-distinctive value can match millions.</summary>
             const int HitLimit = 200;
 
+            /// <summary>Bytes dumped either side of a hit. Wide enough to cover a whole unit struct.</summary>
+            const int Window = 0x800;
+
             float ReadF(long a) => MemLib.ReadFloat((ulong)a) ?? float.NaN;
 
             float wx = ReadF(baseAddr - 0x14);
@@ -193,42 +196,68 @@ namespace D2RCameraTool
             if (hits.Count > HitLimit)
                 log($"worldpos-scan: dumping only the first {HitLimit} of them");
 
-            string dumpPath = Path.ChangeExtension(outPath, null) + "_worldpos.txt";
+            string dumpPath = Path.Combine(AppContext.BaseDirectory, "d2rcamera_wpos.log");
             var sb = new StringBuilder();
-            sb.AppendLine($"# world position ({wx:F6}, {wy:F6}, {wz:F6})   camera base 0x{baseAddr:X}");
-            sb.AppendLine($"# searched for {target:F6}   hits {hits.Count}");
+            sb.AppendLine($"# character world position ({wx:F6}, {wy:F6}, {wz:F6})   camera base 0x{baseAddr:X}");
+            sb.AppendLine($"# searched for {target:F6}   hits {hits.Count}   window +/-0x{Window:X}");
+            sb.AppendLine("# [pos]      one of the three position components");
+            sb.AppendLine("# [angle?]   float inside [-pi, pi] - where a stored heading would live");
+            sb.AppendLine("# [smallint] integer inside [-4096, 4096] - a direction index would be here");
+            sb.AppendLine("# [coord]    large float, i.e. another world coordinate");
 
-            const int window = 0x100;   // bytes either side of each hit
+            // Merge hits closer together than a window, so overlapping regions are dumped once.
+            // The position lives in arrays and history buffers, so hits cluster heavily.
+            var regions = new List<(long start, long end)>();
             foreach (ulong h in hits.Take(HitLimit))
             {
                 long hh = (long)h;
+                if (regions.Count > 0 && hh - regions[^1].end <= Window)
+                    regions[^1] = (regions[^1].start, hh + Window);
+                else
+                    regions.Add((hh - Window, hh + Window));
+            }
+            log($"worldpos-scan: {regions.Count} distinct region(s) after merging");
+
+            foreach (var (start, end) in regions)
+            {
                 sb.AppendLine();
-                sb.AppendLine($"=== hit at 0x{hh:X} ===");
-                var bytes = MemLib.ReadBytes((ulong)(hh - window), window * 2);
+                sb.AppendLine($"=== 0x{start:X} .. 0x{end:X} ===");
+                int len = (int)(end - start);
+                var bytes = MemLib.ReadBytes((ulong)start, len);
                 if (bytes is null)
                 {
                     sb.AppendLine("  (unreadable)");
                     continue;
                 }
 
-                // Mark the components of a position triple if they sit where the camera struct
-                // had them, i.e. at -0x14, -0x10, -0x0c relative to the hit.
                 for (int off = 0; off + 4 <= bytes.Length; off += 4)
                 {
-                    long addr = hh - window + off;
+                    long addr = start + off;
                     float fv = BitConverter.ToSingle(bytes, off);
                     int iv = BitConverter.ToInt32(bytes, off);
-                    long rel = addr - hh;
-                    string mark = "";
-                    if (rel == -0x14) mark = "  <== x?";
-                    else if (rel == -0x10) mark = "  <== y?";
-                    else if (rel == -0x0C) mark = "  <== z (searched value)";
-                    else if (rel == -0x04) mark = "  <== camera angles start here in the camera struct";
-                    if (Math.Abs(fv) > 1000f && Math.Abs(fv) < 1e7f)
-                        mark += "   [large float]";
-                    sb.AppendLine($"  {rel:+#7x}  0x{addr:X}  {fv,16:F6}  int {iv,12}{mark}");
+                    var mark = new StringBuilder();
+
+                    if (Near(fv, wx) || Near(fv, wy) || Near(fv, wz)) mark.Append("  [pos]");
+                    else if (Math.Abs(fv) <= 3.15f && Math.Abs(fv) > 0.01f) mark.Append("  [angle?]");
+                    if (iv >= -4096 && iv <= 4096 && iv != 0) mark.Append("  [smallint]");
+                    if (Math.Abs(fv) > 1000f && Math.Abs(fv) < 1e7f) mark.Append("  [coord]");
+
+                    // Most of a dumped region is zero padding. Skipping it cuts the file by an
+                    // order of magnitude without losing anything: every line carries its offset,
+                    // so the gaps stay visible.
+                    if (iv == 0 && mark.Length == 0) continue;
+
+                    sb.AppendLine($"  {Hex(addr - start)}  0x{addr:X}"
+                                  + $"  {fv,16:F6}  int {iv,12}{mark}");
                 }
             }
+
+            // A custom numeric format string cannot express "+0x" / "-0x" reliably - 'x' is a
+            // literal there, not a specifier, and a negative section would print its own digits.
+            static string Hex(long v) =>
+                v < 0 ? "-0x" + (-v).ToString("X") : "+0x" + v.ToString("X");
+
+            bool Near(float a, float b) => Math.Abs(a - b) <= 0.01f;
 
             try
             {

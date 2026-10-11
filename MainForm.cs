@@ -187,37 +187,55 @@ namespace D2RCameraTool
         /// It deliberately does NOT exit: closing stays a separate, deliberate action.
         /// </summary>
         private void ResetAllValues_Click(object sender, EventArgs e) {
+            if (!Program.ValuesFound) {
+                Program.LogLine("Reset all requested before the camera was located - nothing to restore");
+                return;
+            }
+
             var restored = new List<string>();
 
-            try {
-                if (!Program.ValuesFound) {
-                    Program.LogLine("Reset all requested before the camera was located - nothing to restore");
-                    return;
-                }
+            // Detach the change handlers first, exactly as the individual Reset buttons do:
+            // otherwise writing the value back through the spin box just re-issues the write.
+            PitchSpinner.ValueChanged -= PitchSpinner_ValueChanged!;
+            CamPan_UpDown.ValueChanged -= CamPan_UpDown_ValueChanged!;
+            Roll_UpDown.ValueChanged -= Roll_UpDown_ValueChanged!;
+            CamHeight_UpDown.ValueChanged -= CamHeight_UpDown_ValueChanged!;
+            Zoom_UpDown.ValueChanged -= Zoom_UpDown_ValueChanged!;
 
-                Program.PitchValue.Reset();
-                Program.CamPanValue.Reset();
-                Program.RollValue.Reset();
-                Program.CamHeightValue.Reset();
+            try {
+                // TryResetValue writes the value AND updates the matching spin box. Using the
+                // same helper as the individual Reset buttons is what stops the panel drifting
+                // out of step with the game - which is exactly what this button did wrong
+                // before: it reset memory only and left the readouts showing the old numbers.
+                Program.TryResetValue(Program.PitchValue, PitchSpinner);
+                Program.TryResetValue(Program.CamPanValue, CamPan_UpDown);
+                Program.TryResetValue(Program.RollValue, Roll_UpDown);
+                Program.TryResetValue(Program.CamHeightValue, CamHeight_UpDown);
                 restored.AddRange(new[] { "pitch", "yaw", "roll", "height" });
 
-                if (ResetZoom_CheckBox.Checked) {
-                    Program.ZoomValue.Reset();
+                // Zoom keeps its own guard and its own reset value (0) rather than going through
+                // TryResetValue, matching ZoomReset_Button_Click.
+                if (ResetZoom_CheckBox.Checked && Program.ZoomFound) {
+                    Program.ZoomValue.Write(0);
+                    Zoom_UpDown.Value = 0;
                     restored.Add("zoom");
                 }
-
-                // Read back so the log carries proof of what the game was left holding, which is
-                // the thing that matters if the next launch cannot find the camera.
-                Program.LogLine(
-                    $"Reset all ({string.Join(", ", restored)}). "
-                    + $"Read back: pitch={Program.PitchValue.Read():F6} "
-                    + $"yaw={Program.CamPanValue.Read():F6} "
-                    + $"roll={Program.RollValue.Read():F6} "
-                    + $"height={Program.CamHeightValue.Read():F6} "
-                    + $"zoom={Program.ZoomValue.Read():F6}");
-            } catch (Exception ex) {
-                Program.LogLine("Reset all failed: " + ex.Message);
+            } finally {
+                PitchSpinner.ValueChanged += PitchSpinner_ValueChanged!;
+                CamPan_UpDown.ValueChanged += CamPan_UpDown_ValueChanged!;
+                Roll_UpDown.ValueChanged += Roll_UpDown_ValueChanged!;
+                CamHeight_UpDown.ValueChanged += CamHeight_UpDown_ValueChanged!;
+                Zoom_UpDown.ValueChanged += Zoom_UpDown_ValueChanged!;
             }
+
+            // Log both sides so a mismatch between panel and game is visible in the file.
+            Program.LogLine(
+                $"Reset all ({string.Join(", ", restored)}). "
+                + $"Panel: pitch={PitchSpinner.Value} yaw={CamPan_UpDown.Value} "
+                + $"roll={Roll_UpDown.Value} height={CamHeight_UpDown.Value} zoom={Zoom_UpDown.Value}. "
+                + $"Game: pitch={Program.PitchValue.Read():F6} yaw={Program.CamPanValue.Read():F6} "
+                + $"roll={Program.RollValue.Read():F6} height={Program.CamHeightValue.Read():F6} "
+                + $"zoom={Program.ZoomValue.Read():F6}");
         }
 
         /// <summary>

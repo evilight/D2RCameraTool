@@ -186,6 +186,35 @@ Two things to know before expecting a real third-person camera:
   wrong culling and close-up texture blur. The preset exists mainly to find out how bad that is
   before investing in the follow logic.
 
+### Heading hunt (follow-camera investigation)
+
+A follow camera needs the camera yaw driven from the character's own facing, and that facing is
+not located. D2R.exe's `.text` is encrypted, so it cannot be read out of the code; the only route
+is behaviour.
+
+The discriminator is a **reversal test**. Walk one way, stop, capture; walk the opposite way,
+stop, capture. The character's heading differs by about pi between those two poses, and position,
+animation counters and timers do not. The tool diffs the two samples and reports, first, every
+value whose angular change is near pi.
+
+Procedure:
+
+1. Stand somewhere open. Walk in a straight line for a second or two and **stop**.
+2. Press **F9** (configurable as `sample_hotkey`). The log gets a `SAMPLE sample #1 ...` line.
+3. Walk in the **opposite** direction and stop.
+4. Press **F9** again. The log gets `SAMPLE diff #1 -> #2` with the candidates.
+
+There is also a **Capture sample** button as a fallback if the hotkey does not fire. Prefer the
+hotkey: clicking the tool takes focus away from the game, and losing focus is known to change
+game state.
+
+Settings: `sample_hotkey` (default `F9`), `sample_window` (bytes either side of the camera base,
+default `16384`), `sample_raw_dump` (also append the raw window to `camera_samples.txt`).
+
+If no value reverses by about pi, the heading is either outside the window or not stored as an
+angle - it may be a direction vector, or a small integer direction index (the original games used
+one). Widen `sample_window` and retry, or send the raw dumps for offline analysis.
+
 ### Headless locate (diagnostics / re-deriving after a game update)
 
 ```

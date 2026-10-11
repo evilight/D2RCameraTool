@@ -39,6 +39,12 @@ namespace D2RCameraTool
         [STAThread]
         static int Main(string[] args)
         {
+            if (args.Any(a => a.Equals("--sampler-selftest", StringComparison.OrdinalIgnoreCase)))
+            {
+                SampleDiffSelfTest();
+                return 0;
+            }
+
             if (args.Any(a => a.Equals("--cli", StringComparison.OrdinalIgnoreCase)))
             {
                 return RunCli(args);
@@ -48,6 +54,57 @@ namespace D2RCameraTool
             MainFormInstance = new MainForm();
             Application.Run(MainFormInstance);
             return 0;
+        }
+
+        /// <summary>
+        /// Exercises the sample diff against constructed data, so the heading-detection logic can
+        /// be checked without a game attached. Writes its result to a file rather than the
+        /// console: this is a Windows-subsystem binary, so Console.WriteLine has nowhere to go
+        /// unless a parent console is attached first.
+        /// </summary>
+        private static void SampleDiffSelfTest()
+        {
+            static uint Bits(float f) => BitConverter.ToUInt32(BitConverter.GetBytes(f), 0);
+
+            var a = new CameraSampler.Sample { Index = 1, Base = 0x1000, Yaw = 0.2f };
+            var b = new CameraSampler.Sample { Index = 2, Base = 0x1000, Yaw = 0.2f };
+
+            // The heading signature: an angle that reversed.
+            a.Words[0x000] = Bits(0.30f);
+            b.Words[0x000] = Bits(0.30f + (float)Math.PI);
+
+            // A reversed angle reached by wrapping past -pi rather than by adding.
+            a.Words[0x004] = Bits(-3.00f);
+            b.Words[0x004] = Bits(0.20f);
+
+            // Things that must NOT be reported as a heading.
+            a.Words[0x008] = Bits(1234.5f);   // a coordinate
+            b.Words[0x008] = Bits(1236.0f);
+            a.Words[0x00C] = 42u;             // a counter
+            b.Words[0x00C] = 43u;
+            a.Words[0x010] = Bits(0.5f);      // unchanged
+            b.Words[0x010] = Bits(0.5f);
+
+            string report = CameraSampler.BuildDiffReport(a, b);
+
+            // Only the reversed-candidates section matters for the assertion. The coordinate and
+            // the counter are EXPECTED to appear further down as context - the point is that they
+            // are not claimed as headings.
+            int cut = report.IndexOf("largest other changes", StringComparison.Ordinal);
+            string reversedSection = cut >= 0 ? report.Substring(0, cut) : report;
+            bool ok = reversedSection.Contains("0x000000") && reversedSection.Contains("0x000004")
+                      && !reversedSection.Contains("0x000008") && !reversedSection.Contains("0x00000C");
+
+            var text = new System.Text.StringBuilder();
+            text.AppendLine(ok ? "SELFTEST PASS" : "SELFTEST FAIL");
+            text.AppendLine(ok
+                ? "  both reversed angles flagged; coordinate and counter NOT flagged"
+                : "  expectations not met, see the report below");
+            text.AppendLine();
+            text.AppendLine(report);
+
+            string path = Path.Combine(AppContext.BaseDirectory, "sampler_selftest.txt");
+            try { File.WriteAllText(path, text.ToString()); } catch { }
         }
 
         // ------------------------------------------------------------ CLI mode
@@ -480,6 +537,11 @@ namespace D2RCameraTool
         /// the ranked best so the engine cannot restore a stale copy over our changes.
         /// </summary>
         public static readonly List<long> CameraMirrors = new();
+
+        /// <summary>
+        /// Memory sampler used to hunt for the character's heading. See CameraSampler.
+        /// </summary>
+        public static readonly CameraSampler Sampler = new();
 
         public static void RefreshValues(long valuesBase)
         {

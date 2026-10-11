@@ -51,6 +51,7 @@ namespace D2RCameraTool
         private GroupBox SessionGroup = null!;
         private Button ResetAll_Button = null!;
         private Button OverShoulder_Button = null!;
+        private Button CaptureSample_Button = null!;
         private System.Windows.Forms.Timer? wasdUiTimer;
         private System.Threading.Timer? wasdWriteTimer;
         private bool lastFocusState;
@@ -185,7 +186,7 @@ namespace D2RCameraTool
         ///
         /// It deliberately does NOT exit: closing stays a separate, deliberate action.
         /// </summary>
-        private void ResetAllValues_Click(object sender, EventArgs e) {
+        private void ResetAllValues_Click(object? sender, EventArgs e) {
             if (!Program.ValuesFound) {
                 Program.LogLine("Reset all requested before the camera was located - nothing to restore");
                 return;
@@ -244,7 +245,7 @@ namespace D2RCameraTool
         /// memory directly: their ValueChanged handlers are the existing, tested write path, and
         /// the displayed values stay in step with the game.
         /// </summary>
-        private void OverShoulder_Click(object sender, EventArgs e) {
+        private void OverShoulder_Click(object? sender, EventArgs e) {
             if (!Program.ValuesFound) {
                 Program.LogLine("Over-shoulder pose requested before the camera was located");
                 return;
@@ -292,9 +293,14 @@ namespace D2RCameraTool
                 Location = new Point(142, 14),
                 Size = new Size(150, 26),
             };
+            CaptureSample_Button = new Button {
+                Text = "Capture sample",
+                Location = new Point(304, 14),
+                Size = new Size(150, 26),
+            };
 
             SessionGroup.Controls.AddRange(new Control[] {
-                ResetAll_Button, OverShoulder_Button,
+                ResetAll_Button, OverShoulder_Button, CaptureSample_Button,
             });
 
             ClientSize = new Size(ClientSize.Width, ClientSize.Height + extra);
@@ -303,7 +309,16 @@ namespace D2RCameraTool
 
             ResetAll_Button.Click += ResetAllValues_Click;
             OverShoulder_Button.Click += OverShoulder_Click;
+            CaptureSample_Button.Click += CaptureSample_Click;
         }
+
+        /// <summary>
+        /// Fallback for the capture hotkey. The hotkey is the primary route because it works with
+        /// the game focused, but it depends on the global keyboard hook, and if that does not fire
+        /// there would otherwise be no way to take a sample at all.
+        /// </summary>
+        private void CaptureSample_Click(object? sender, EventArgs e) =>
+            Program.Sampler.Capture("button");
 
         /// <summary>Pushes the control's settings into the widgets (used after loading the ini).</summary>
         private void ApplyWasdToUi() {
@@ -413,6 +428,14 @@ namespace D2RCameraTool
                 + $"mainPanel={Main_Panel.Bounds} wasd={WasdGroup.Bounds} "
                 + $"session={SessionGroup.Bounds} "
                 + $"statusTop={statusStrip1.Top} statusH={statusStrip1.Height}");
+
+            // Recorded so a capture that never happens can be told apart from one that was never
+            // armed. The hotkey depends on the global keyboard hook, which cannot be exercised
+            // without a real keypress.
+            Program.LogLine(
+                $"Sampler armed: hotkey={Program.Sampler.HotKey} "
+                + $"window=+/-0x{Program.Sampler.WindowRadius:X} rawDump={Program.Sampler.RawDump} "
+                + $"(or use the Capture sample button)");
         }
 
         /// <summary>Camera write step. Runs on a threadpool timer; must never touch a control.</summary>
@@ -536,6 +559,13 @@ namespace D2RCameraTool
             // Feed the WASD control from the hook as well as from GetAsyncKeyState: a key this
             // hook swallows may never reach the input queue the polling API reads.
             Wasd.OnKeyPressed(e.KeyCode);
+
+            // Capture hotkey for the heading hunt. It fires from the hook, so it works while the
+            // game holds focus - which matters, because clicking the tool would take focus away
+            // and losing focus is known to change game state.
+            if (Program.Sampler.HotKey != Keys.None && e.KeyCode == Program.Sampler.HotKey) {
+                Program.Sampler.Capture("hotkey");
+            }
 
             if (MousePanHotKey != Keys.None && e.KeyCode == MousePanHotKey) {
                 if (!IsMousePanPressed) {
@@ -874,6 +904,10 @@ namespace D2RCameraTool
             data["wasd_require_focus"] = Wasd.RequireGameFocus ? "1" : "0";
             data["wasd_update_ms"] = Wasd.UpdateIntervalMs.ToString(CultureInfo.InvariantCulture);
 
+            data["sample_hotkey"] = Program.Sampler.HotKey.ToString();
+            data["sample_window"] = Program.Sampler.WindowRadius.ToString(CultureInfo.InvariantCulture);
+            data["sample_raw_dump"] = Program.Sampler.RawDump ? "1" : "0";
+
             for (int i=0; i<PresetsArray.Length; i++) {
                 float[] preset = { PresetsArray[i].Sensitivity, PresetsArray[i].Pitch, PresetsArray[i].Yaw, PresetsArray[i].Roll, PresetsArray[i].Height, PresetsArray[i].Zoom };
                 data["preset" + (i+1).ToString()] = JoinFloats(preset);
@@ -937,6 +971,17 @@ namespace D2RCameraTool
                     case "wasd_update_ms":
                         if (int.TryParse(pair.Value, out int ms) && ms >= 4 && ms <= 100)
                             Wasd.UpdateIntervalMs = ms;
+                        break;
+                    case "sample_hotkey":
+                        if (Enum.TryParse<Keys>(pair.Value, out var sampleKey))
+                            Program.Sampler.HotKey = sampleKey;
+                        break;
+                    case "sample_window":
+                        if (int.TryParse(pair.Value, out int win) && win >= 0x100 && win <= 0x100000)
+                            Program.Sampler.WindowRadius = win;
+                        break;
+                    case "sample_raw_dump":
+                        Program.Sampler.RawDump = pair.Value == "1";
                         break;
                     case "preset1":
                         preset = StringToFloats(pair.Value);

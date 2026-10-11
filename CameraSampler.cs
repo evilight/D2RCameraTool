@@ -196,11 +196,14 @@ internal sealed class CameraSampler
 
             // The original games stored facing as a small integer direction index, in which case a
             // reversal is a change of about half the range (e.g. 32 out of 64) rather than pi.
-            if (Math.Abs(ia) <= SmallIntLimit && Math.Abs(ib) <= SmallIntLimit)
+            // Range-tested without negating: Math.Abs(int.MinValue) throws, and any bit pattern
+            // can turn up in a game struct - this crashed the whole diff once already.
+            if (IsSmallInt(ia) && IsSmallInt(ib))
             {
-                string mark = Math.Abs(Math.Abs(ib - ia) - 32) <= 2 ? "  <== near half range" : "";
+                long d = (long)ib - ia;
+                string mark = Math.Abs(Math.Abs(d) - 32) <= 2 ? "  <== near half range" : "";
                 smallInts.Add($"    +0x{off:X6} (0x{(long)b.Base + off:X}) "
-                              + $"int {ia} -> {ib} (d={ib - ia}){mark}");
+                              + $"int {ia} -> {ib} (d={d}){mark}");
                 continue;
             }
 
@@ -263,6 +266,12 @@ internal sealed class CameraSampler
 
     /// <summary>Range for "small integer" - a direction index is a handful of bits, not a count.</summary>
     private const int SmallIntLimit = 4096;
+
+    /// <summary>
+    /// True when the value is small enough to be a direction index. Deliberately does not use
+    /// Math.Abs: negating int.MinValue throws, and any bit pattern can appear in a game struct.
+    /// </summary>
+    private static bool IsSmallInt(int v) => v >= -SmallIntLimit && v <= SmallIntLimit;
 
     /// <summary>
     /// A float worth treating as an angle. Real angles live roughly in [-2pi, 2pi]; values far

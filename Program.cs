@@ -94,6 +94,11 @@ namespace D2RCameraTool
             a.Words[0x018] = 8u;
             b.Words[0x018] = 40u;
 
+            // int.MinValue: negating it throws, which crashed the diff once. Any bit pattern can
+            // appear in a game struct, so this must be classified without blowing up.
+            a.Words[0x01C] = 0x80000000u;
+            b.Words[0x01C] = 0x80000001u;
+
             string report = CameraSampler.BuildDiffReport(a, b);
 
             // Check each section only for the offsets it is responsible for: the coordinate and

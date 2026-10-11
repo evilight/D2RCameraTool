@@ -178,14 +178,16 @@ namespace D2RCameraTool
             // height being near zero and shared by everything standing on the ground.
             float target = Math.Abs(wx) >= Math.Abs(wz) ? wx : wz;
 
-            // A world position is a large number. If this reads as zero or anything small the
-            // offsets are wrong for this build, and searching would match millions of addresses -
-            // measured: a zero target matched 9.1 million of them.
-            if (Math.Abs(target) < 1f)
+            // A world position is a large number - thousands, measured on the live game. The first
+            // version of this guard only rejected values below 1, which let a false estimate of
+            // exactly 1.0 through and matched 4 million addresses. Anything in single digits is
+            // not a world coordinate, so the threshold is well above that.
+            if (Math.Abs(target) < 100f)
             {
                 log($"worldpos-scan: the triple at base-0x14 reads ({wx:F6}, {wy:F6}, {wz:F6}), "
-                    + "which is not a world position - the offsets have changed for this build. "
-                    + "Nothing was searched.");
+                    + "which is not a world position - either the camera address is a structural "
+                    + "guess rather than a signature match, or the offsets have changed for this "
+                    + "build. Nothing was searched.");
                 return null;
             }
 
@@ -674,6 +676,19 @@ namespace D2RCameraTool
                        + (CameraMirrors.Count > 0
                           ? $"; mirrors: {string.Join(", ", CameraMirrors.Select(m => "0x" + m.ToString("X")))}"
                           : ""));
+
+                // A structural hit with no signature evidence at all is a guess. Writing to a
+                // guessed address corrupts whatever actually lives there, so say so loudly rather
+                // than letting the user drive and reset against it unaware.
+                if (res.Method != "legacy signature" && res.Best.LegacyExactFields == 0)
+                {
+                    Report("WARNING: no signature match - this address is a structural GUESS. "
+                           + "Reset the values in game and re-locate before trusting it.");
+                    LogLine("The 12-byte camera signature was absent, so the locator fell back to a "
+                            + "structural guess with 0/4 fields matching. The values were almost "
+                            + "certainly left modified by a previous session: press Reset all values "
+                            + "before quitting, or the next launch will have to guess again.");
+                }
             }
             else
             {

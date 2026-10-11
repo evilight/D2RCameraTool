@@ -106,18 +106,13 @@ internal sealed class WasdCameraControl
     private double _rateWindowStartMs;
     public double MeasuredHz { get; private set; }
 
-    // Post-release revert watch. How long to keep checking after the last write, and how often
-    // to sample. The window is long because the observed restoration took ~3.5 s, which is far
-    // too slow to be a per-frame recompute.
-    private const double RevertWatchMs = 25000;
-    private const double SampleEveryMs = 250;
-    private const int SampleKeep = 24;
-    private bool _watchArmed;
-    private double _watchStartMs;
-    private double _nextSampleMs;
-    private float _watchYaw;
-    private bool _watchReported;
-    private readonly List<string> _watchSamples = new();
+    // Continuous camera monitor. Samples the value we manage and reports any change we did not
+    // make, with the context. Unbounded on purpose - see MonitorCamera.
+    private const double MonitorEveryMs = 250;
+    private double _nextMonitorMs;
+    private double _lastWriteMs;
+    private float _lastSeenYaw = float.NaN;
+    private int _externalChanges;
 
     public bool GameFocused => _gameFocused;
     public bool AnyKeyHeld { get; private set; }
@@ -187,6 +182,7 @@ internal sealed class WasdCameraControl
         + $"keys[A={SourceReport(Keys.A)} D={SourceReport(Keys.D)} "
         + $"W={SourceReport(Keys.W)} S={SourceReport(Keys.S)}] moved={AnyKeyHeld} "
         + $"engineRewrites[yaw={YawRewrites} pitch={PitchRewrites}] "
+        + $"externalChanges={_externalChanges} "
         + $"yawAddr=0x{Program.CamPanValue?.BaseAddress:X} pitchAddr=0x{Program.PitchValue?.BaseAddress:X}";
 
     /// <summary>
@@ -241,7 +237,7 @@ internal sealed class WasdCameraControl
         AnyKeyHeld = yawStep != 0 || pitchStep != 0;
         if (!AnyKeyHeld)
         {
-            WatchForRevert();
+            MonitorCamera();
             return false;
         }
 
@@ -262,6 +258,8 @@ internal sealed class WasdCameraControl
             {
                 WriteMirrors(0x8, next);
                 _lastYawWritten = next;
+                _lastSeenYaw = next;                    // our own write, not an external change
+                _lastWriteMs = _clock.Elapsed.TotalMilliseconds;
                 DisplayYaw = next;
                 DisplayYawDirty = true;
                 wrote = true;
@@ -285,8 +283,8 @@ internal sealed class WasdCameraControl
             }
         }
 
-        // Movement is running, so the post-release watch starts fresh from the next release.
-        _watchArmed = false;
+        // Movement is running; the monitor keeps watching for anything we did not write.
+        MonitorCamera();
         return wrote;
     }
 
@@ -306,50 +304,34 @@ internal sealed class WasdCameraControl
     }
 
     /// <summary>
-    /// Watches for the yaw value being restored after the keys are released.
+    /// Permanent monitor for the value we manage: samples it and reports any change this
+    /// control did not make, together with the context at the time.
     ///
-    /// This is the case the in-hold counter could not see: it only ran while a key was held,
-    /// which is exactly when the engine is NOT restoring. The reported symptom - the view
-    /// follows while held and returns to its old position on release - is what this detects.
-    ///
-    /// It samples rather than just checking once, because "the view came back" could be an
-    /// instant overwrite or a gradual interpolation back to a default, and those need opposite
-    /// fixes. It also samples the mirror copy, since whichever of the two moves FIRST is the
-    /// upstream one and therefore the one worth writing.
+    /// This replaced a watch that only ran for 25 s after the last key release. That window
+    /// missed the actual trigger: comparing two sessions showed the value surviving a full
+    /// 25 s untouched after release, and reverting about a second after the game LOST FOCUS.
+    /// A bounded post-release window cannot see an event that happens later, so the monitor
+    /// now runs continuously and reports whatever it finds, whenever it finds it.
     /// </summary>
-    private void WatchForRevert()
+    private void MonitorCamera()
     {
-        if (float.IsNaN(_lastYawWritten) || Program.CamPanValue.BaseAddress <= 0) return;
+        if (Program.CamPanValue.BaseAddress <= 0) return;
 
         double nowMs = _clock.Elapsed.TotalMilliseconds;
-
-        if (!_watchArmed)
-        {
-            _watchArmed = true;
-            _watchStartMs = nowMs;
-            _watchYaw = _lastYawWritten;
-            _watchReported = false;
-            _watchSamples.Clear();
-            _nextSampleMs = 0;
-            return;
-        }
-
-        if (_watchReported || nowMs - _watchStartMs > RevertWatchMs) return;
-
-        double rel = nowMs - _watchStartMs;
-        if (rel < _nextSampleMs) return;
-        _nextSampleMs = rel + SampleEveryMs;
+        if (nowMs < _nextMonitorMs) return;
+        _nextMonitorMs = nowMs + MonitorEveryMs;
 
         float cur = Program.CamPanValue.Read();
-        _watchSamples.Add($"{rel:F0}:best={cur:F5},mirror={ReadMirrorYaw():F5}");
-        if (_watchSamples.Count > SampleKeep) _watchSamples.RemoveAt(0);
+        if (float.IsNaN(_lastSeenYaw)) { _lastSeenYaw = cur; return; }
+        if (Math.Abs(cur - _lastSeenYaw) <= 1e-6f) return;
 
-        if (Math.Abs(cur - _watchYaw) <= 1e-6f) return;
-
-        _watchReported = true;
+        _externalChanges++;
         Program.LogLine(
-            $"WASD yaw CHANGED {rel:F0} ms after the last write: we left {_watchYaw:F6}, now {cur:F6}. "
-            + $"Timeline (ms:best,mirror): {string.Join(" | ", _watchSamples)}");
+            $"WASD external yaw change #{_externalChanges}: {_lastSeenYaw:F6} -> {cur:F6} "
+            + $"(focused={_gameFocused} holding={AnyKeyHeld} "
+            + $"msSinceOurLastWrite={nowMs - _lastWriteMs:F0} mirrorYaw={ReadMirrorYaw():F6})");
+
+        _lastSeenYaw = cur;   // do not report the same change repeatedly
     }
 
     private static float ReadMirrorYaw()

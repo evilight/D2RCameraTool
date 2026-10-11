@@ -26,16 +26,31 @@ namespace D2RCameraTool;
 internal sealed class FollowCamera
 {
     /// <summary>
-    /// World units that must accumulate before the direction is re-measured. A step, not a
-    /// twitch: below this the delta is mostly float noise and would jitter the camera.
+    /// World units that must accumulate before the direction is measured on a walk already in
+    /// progress. One unit was far too short: the measured direction wandered by up to half a
+    /// radian on a straight walk, and every wobble moved the camera. Three units is about a
+    /// dozen frames, which averages the sampling noise out.
     /// </summary>
-    private const float MoveThreshold = 1.0f;
+    private const float MoveWindow = 3.0f;
 
     /// <summary>
-    /// How much the direction must change before the camera is re-aimed. Anything smaller is
-    /// held, so the camera sits perfectly still while the character walks a straight line.
+    /// The same, for the first measurement of a new walk, where being prompt matters more than
+    /// being smooth - this is what makes the camera turn at the start of a walk rather than
+    /// halfway through it.
     /// </summary>
-    private const double SnapThreshold = 0.08;
+    private const float StartWindow = 0.5f;
+
+    /// <summary>
+    /// How far the direction must turn before the camera is re-aimed mid-walk. Large, because a
+    /// click that changes direction usually changes it a lot, and anything smaller is noise.
+    /// </summary>
+    private const double TurnThreshold = 0.5;
+
+    /// <summary>Per-tick movement below this counts as standing still, in world units.</summary>
+    private const float StillStep = 0.02f;
+
+    /// <summary>How long without movement before the character counts as having stopped.</summary>
+    private const double StillMs = 300;
 
     public bool Enabled;
     public bool Invert;
@@ -46,11 +61,15 @@ internal sealed class FollowCamera
     private readonly Stopwatch _clock = Stopwatch.StartNew();
 
     private float _lastX, _lastZ;
+    private float _accX, _accZ;
+    private double _stillMs;
+    private bool _stationary;
+    private double _lastTickMs;
     private bool _haveLast;
     private double _direction;
     private bool _haveDirection;
     private bool _loggedRoll;
-    private DateTime _lastLog = DateTime.MinValue;
+    private string _lastReason = "";
 
     public double Direction => _direction;
     public double LastYawWritten { get; private set; }
@@ -62,6 +81,9 @@ internal sealed class FollowCamera
     {
         _haveLast = false;
         _haveDirection = false;
+        _accX = _accZ = 0;
+        _stillMs = 0;
+        _stationary = false;
         _loggedRoll = false;
         SnapCount = 0;
         Active = false;
@@ -84,6 +106,11 @@ internal sealed class FollowCamera
 
         float x = rx.Value, z = rz.Value;
 
+        double nowMs = _clock.Elapsed.TotalMilliseconds;
+        double dt = nowMs - _lastTickMs;
+        _lastTickMs = nowMs;
+        if (dt <= 0) dt = 1;
+
         if (!_haveLast)
         {
             _lastX = x;
@@ -92,23 +119,38 @@ internal sealed class FollowCamera
             return false;
         }
 
-        float dx = x - _lastX;
-        float dz = z - _lastZ;
-        float moved = MathF.Sqrt(dx * dx + dz * dz);
-
-        if (moved < MoveThreshold) return false;   // hold: too little movement to mean anything
-
+        // Per-tick step, for the standing-still test.
+        float stepX = x - _lastX;
+        float stepZ = z - _lastZ;
+        float step = MathF.Sqrt(stepX * stepX + stepZ * stepZ);
         _lastX = x;
         _lastZ = z;
 
-        double measured = Math.Atan2(dz, dx);
-        bool snap;
+        bool wasStationary = _stationary;
+        if (step > StillStep) _stillMs = 0; else _stillMs += dt;
+        _stationary = _stillMs > StillMs;
 
-        if (!_haveDirection)
+        // Everything since the last measurement, so a short window still yields a stable angle.
+        _accX += stepX;
+        _accZ += stepZ;
+        float acc = MathF.Sqrt(_accX * _accX + _accZ * _accZ);
+
+        // A new walk: be prompt, because the whole point is to turn the camera at the start of it.
+        bool starting = wasStationary && step > StillStep;
+        float window = starting ? StartWindow : MoveWindow;
+        if (acc < window) return false;
+
+        double measured = Math.Atan2(_accZ, _accX);
+        _accX = 0;
+        _accZ = 0;
+
+        bool snap;
+        string reason;
+
+        if (!_haveDirection || starting)
         {
-            _direction = measured;
-            _haveDirection = true;
             snap = true;
+            reason = _haveDirection ? "new walk" : "first fix";
         }
         else
         {
@@ -116,15 +158,16 @@ internal sealed class FollowCamera
             while (change > Math.PI) change -= 2 * Math.PI;
             while (change < -Math.PI) change += 2 * Math.PI;
 
-            // Only a real change of direction moves the camera - a new click. Anything under the
-            // threshold is measurement noise on a straight walk and must not nudge the view.
-            if (Math.Abs(change) < SnapThreshold) return false;
-
-            _direction = measured;
-            snap = true;
+            // Mid-walk only a real turn moves the camera. The measured direction wanders slightly
+            // even on a straight line, and following that wander is what made the view feel wrong.
+            snap = Math.Abs(change) > TurnThreshold;
+            reason = $"turn {change:F3}";
         }
 
         if (!snap) return false;
+
+        _direction = measured;
+        _lastReason = reason;
 
         double target = (_direction + Offset) * (Invert ? -1 : 1);
         target = WrapPi(target);
@@ -168,8 +211,8 @@ internal sealed class FollowCamera
         }
 
         Program.LogLine(
-            $"Follow snap #{SnapCount}: pos=({x:F2},{z:F2}) dir={_direction:F4} "
-            + $"-> yaw={target:F4} mirror={mirror:F4} diff={mirror - target:F4}");
+            $"Follow snap #{SnapCount} ({reason}): pos=({x:F2},{z:F2}) dir={_direction:F4} "
+            + $"-> yaw={target:F4} mirror={mirror:F4} lag={WrapPi(mirror - target):F4}");
 
         return true;
     }

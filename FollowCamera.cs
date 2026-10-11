@@ -39,6 +39,7 @@ internal sealed class FollowCamera
     private double _direction;
     private bool _haveDirection;
     private bool _loggedRoll;
+    private DateTime _lastLog = DateTime.MinValue;
 
     public double Direction => _direction;
     public double LastYawWritten { get; private set; }
@@ -138,6 +139,25 @@ internal sealed class FollowCamera
 
         LastYawWritten = target;
         Active = true;
+
+        // Throttled trace. The two camera copies are both written, so a persistent disagreement
+        // means the engine is overwriting one of them afterwards - and if the renderer reads the
+        // copy we do not control, the view can only ever be partly right.
+        var now = DateTime.UtcNow;
+        if ((now - _lastLog).TotalMilliseconds > 500)
+        {
+            _lastLog = now;
+            float mirror = float.NaN;
+            foreach (long m in Program.CameraMirrors)
+            {
+                var v = Program.MemLib.ReadFloat((ulong)(m + 0x8));
+                if (v.HasValue) { mirror = v.Value; break; }
+            }
+            Program.LogLine(
+                $"Follow: pos=({x:F2},{z:F2}) moved={moved:F3} dir={_direction:F4} "
+                + $"yaw={target:F4} mirror={mirror:F4} diff={mirror - target:F4}");
+        }
+
         return true;
     }
 

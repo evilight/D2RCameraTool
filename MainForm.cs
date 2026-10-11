@@ -327,8 +327,12 @@ namespace D2RCameraTool
         }
 
         /// <summary>
-        /// Searches the whole process for the character's world position, on a background thread -
-        /// it reads several gigabytes and takes around ten seconds.
+        /// Two-phase world-region comparison on one button.
+        ///
+        /// First press: scan the whole process for the character's position, dump the regions that
+        /// hold it, and arm a baseline. Second press: re-read just those regions - about 32 KB, so
+        /// instant - and report what changed. A heading shows up in that diff as a value that
+        /// reversed by pi, negated, or moved by half a direction range.
         /// </summary>
         private void WorldScan_Click(object? sender, EventArgs e) {
             if (!Program.ValuesFound || Program.PitchValue.BaseAddress <= 0) {
@@ -336,14 +340,33 @@ namespace D2RCameraTool
                 return;
             }
 
+            WorldScan_Button.Enabled = false;
+
+            if (WorldRegionWatch.Armed) {
+                Program.LogLine("World region diff - comparing against the armed baseline");
+                System.Threading.Tasks.Task.Run(() => {
+                    try {
+                        WorldRegionWatch.DiffAndReport();
+                    } catch (Exception ex) {
+                        Program.LogLine("World region diff failed: " + ex.Message);
+                    } finally {
+                        // Disarmed so the next press starts a fresh scan rather than diffing
+                        // against a baseline that may no longer mean anything.
+                        WorldRegionWatch.Disarm();
+                        try { BeginInvoke(() => WorldScan_Button.Enabled = true); } catch { }
+                    }
+                });
+                return;
+            }
+
             long baseAddr = Program.PitchValue.BaseAddress;
             string outPath = Path.Combine(AppContext.BaseDirectory, "worldscan.json");
-            WorldScan_Button.Enabled = false;
             Program.LogLine("World position scan started - this takes about ten seconds");
 
             System.Threading.Tasks.Task.Run(() => {
                 try {
-                    Program.RunWorldPositionScan(baseAddr, outPath, Program.LogLine);
+                    var regions = Program.RunWorldPositionScan(baseAddr, outPath, Program.LogLine);
+                    if (regions is { Count: > 0 }) WorldRegionWatch.Arm(regions, baseAddr);
                 } catch (Exception ex) {
                     Program.LogLine("World position scan failed: " + ex.Message);
                 } finally {

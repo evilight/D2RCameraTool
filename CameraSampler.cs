@@ -150,18 +150,32 @@ internal sealed class CameraSampler
     /// Split out from the logging so it can be exercised without a game attached - see the
     /// --sampler-selftest CLI mode.
     /// </summary>
-    internal static string BuildDiffReport(Sample a, Sample b)
+    internal static string BuildDiffReport(Sample a, Sample b) =>
+        BuildDiffReport(
+            a.Words, b.Words, b.Base, $"#{a.Index} -> #{b.Index}",
+            $"pose A: yaw={a.Yaw:F6} pitch={a.Pitch:F6} roll={a.Roll:F6} "
+            + $"height={a.Height:F6} zoom={a.Zoom:F6}",
+            $"pose B: yaw={b.Yaw:F6} pitch={b.Pitch:F6} roll={b.Roll:F6} "
+            + $"height={b.Height:F6} zoom={b.Zoom:F6}");
+
+    /// <summary>
+    /// Compares two sets of words at the same base address. Shared with the world-region watch,
+    /// which needs exactly the same classification over a different part of memory.
+    /// </summary>
+    internal static string BuildDiffReport(
+        IDictionary<long, uint> a, IDictionary<long, uint> b, long baseAddr,
+        string label, string? noteA = null, string? noteB = null)
     {
         var reversed = new List<string>();
         var signFlips = new List<string>();
         var smallInts = new List<string>();
         var others = new List<(double magnitude, string text)>();
 
-        foreach (var kv in b.Words)
+        foreach (var kv in b)
         {
             long off = kv.Key;
             uint wb = kv.Value;
-            if (!a.Words.TryGetValue(off, out uint wa)) continue;
+            if (!a.TryGetValue(off, out uint wa)) continue;
             if (wa == wb) continue;
 
             float fa = BitConverter.ToSingle(BitConverter.GetBytes(wa), 0);
@@ -178,7 +192,7 @@ internal sealed class CameraSampler
 
             if (angular)
             {
-                reversed.Add($"    +0x{off:X6} (0x{(long)b.Base + off:X}) "
+                reversed.Add($"    +0x{off:X6} (0x{baseAddr + off:X}) "
                              + $"float {fa:F6} -> {fb:F6}  delta={delta:F6} rad "
                              + $"(reversed; as int {ia} -> {ib})");
                 continue;
@@ -189,7 +203,7 @@ internal sealed class CameraSampler
             if (IsUnitComponent(fa) && IsUnitComponent(fb)
                 && Math.Abs(fa + fb) <= 0.02f * Math.Max(Math.Abs(fa), Math.Abs(fb)))
             {
-                signFlips.Add($"    +0x{off:X6} (0x{(long)b.Base + off:X}) "
+                signFlips.Add($"    +0x{off:X6} (0x{baseAddr + off:X}) "
                               + $"float {fa:F6} -> {fb:F6}  (negated; as int {ia} -> {ib})");
                 continue;
             }
@@ -202,23 +216,21 @@ internal sealed class CameraSampler
             {
                 long d = (long)ib - ia;
                 string mark = Math.Abs(Math.Abs(d) - 32) <= 2 ? "  <== near half range" : "";
-                smallInts.Add($"    +0x{off:X6} (0x{(long)b.Base + off:X}) "
+                smallInts.Add($"    +0x{off:X6} (0x{baseAddr + off:X}) "
                               + $"int {ia} -> {ib} (d={d}){mark}");
                 continue;
             }
 
-            others.Add((Math.Abs(fb - fa), $"    +0x{off:X6} (0x{(long)b.Base + off:X}) "
+            others.Add((Math.Abs(fb - fa), $"    +0x{off:X6} (0x{baseAddr + off:X}) "
                              + $"float {fa:F6} -> {fb:F6} (d={fb - fa:F6})  int {ia} -> {ib}"));
         }
 
         var sb = new StringBuilder();
-        sb.AppendLine($"SAMPLE diff #{a.Index} -> #{b.Index}: "
+        sb.AppendLine($"SAMPLE diff {label}: "
                       + $"{reversed.Count} near-pi, {signFlips.Count} negated, "
                       + $"{smallInts.Count} small-int, {others.Count} other change(s)");
-        sb.AppendLine($"SAMPLE   pose A: yaw={a.Yaw:F6} pitch={a.Pitch:F6} roll={a.Roll:F6} "
-                      + $"height={a.Height:F6} zoom={a.Zoom:F6}");
-        sb.AppendLine($"SAMPLE   pose B: yaw={b.Yaw:F6} pitch={b.Pitch:F6} roll={b.Roll:F6} "
-                      + $"height={b.Height:F6} zoom={b.Zoom:F6}");
+        if (noteA is not null) sb.AppendLine("SAMPLE   " + noteA);
+        if (noteB is not null) sb.AppendLine("SAMPLE   " + noteB);
 
         if (reversed.Count > 0)
         {

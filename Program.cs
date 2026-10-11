@@ -150,7 +150,8 @@ namespace D2RCameraTool
         /// So: find every structure holding that position. The unit is among them, and the unit is
         /// where a heading would be stored.
         /// </summary>
-        internal static void RunWorldPositionScan(long baseAddr, string outPath, Action<string> log)
+        internal static List<(long start, int len)>? RunWorldPositionScan(
+            long baseAddr, string outPath, Action<string> log)
         {
             /// <summary>Cap on dumped hits - a non-distinctive value can match millions.</summary>
             const int HitLimit = 200;
@@ -167,7 +168,7 @@ namespace D2RCameraTool
             if (float.IsNaN(wx) || float.IsNaN(wy) || float.IsNaN(wz))
             {
                 log("worldpos-scan: could not read the triple before the camera angles");
-                return;
+                return null;
             }
 
             log($"worldpos-scan: character world position reads "
@@ -185,7 +186,7 @@ namespace D2RCameraTool
                 log($"worldpos-scan: the triple at base-0x14 reads ({wx:F6}, {wy:F6}, {wz:F6}), "
                     + "which is not a world position - the offsets have changed for this build. "
                     + "Nothing was searched.");
-                return;
+                return null;
             }
 
             byte[] pattern = BitConverter.GetBytes(target);
@@ -268,6 +269,10 @@ namespace D2RCameraTool
             {
                 log("worldpos-scan: could not write the dump: " + ex.Message);
             }
+
+            // Returned so the caller can arm a two-phase comparison on exactly these regions.
+            // Converted from (start, end) to (start, length) at the boundary.
+            return regions.Select(r => (r.start, (int)(r.end - r.start))).ToList();
         }
 
         /// <summary>
@@ -283,6 +288,9 @@ namespace D2RCameraTool
             bool writeAccess = args.Any(a => a.Equals("--allow-write", StringComparison.OrdinalIgnoreCase));
             bool forceStructural = args.Any(a => a.Equals("--force-structural", StringComparison.OrdinalIgnoreCase));
             bool worldScan = args.Any(a => a.Equals("--worldpos-scan", StringComparison.OrdinalIgnoreCase));
+            string? watchArg = ArgValue(args, "--worldpos-watch");
+            bool watch = watchArg is not null;
+            int watchSeconds = int.TryParse(watchArg, out int ws) && ws > 0 ? ws : 15;
             string? pidArg = ArgValue(args, "--pid");
 
             var log = new StringBuilder();
@@ -322,12 +330,28 @@ namespace D2RCameraTool
                 return 3;
             }
 
-            if (worldScan)
+            if (worldScan && !watch)
             {
                 if (res.Found && res.Best is not null)
                     RunWorldPositionScan((long)res.Best.Base, outPath, Log);
                 else
                     Log("--worldpos-scan needs a located camera; the scan was skipped");
+            }
+
+            // Two-phase form, for exercising the region watch without the GUI: scan, arm, wait,
+            // re-read and diff.
+            if (watch && res.Found && res.Best is not null)
+            {
+                long b = (long)res.Best.Base;
+                var regions = RunWorldPositionScan(b, outPath, Log);
+                if (regions is { Count: > 0 })
+                {
+                    WorldRegionWatch.Arm(regions, b);
+                    Log($"waiting {watchSeconds}s, then re-reading the same regions ...");
+                    Thread.Sleep(watchSeconds * 1000);
+                    WorldRegionWatch.DiffAndReport();
+                    WorldRegionWatch.Disarm();
+                }
             }
 
             var report = new

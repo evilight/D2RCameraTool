@@ -48,13 +48,10 @@ namespace D2RCameraTool
         private CheckBox WasdFocus_CheckBox = null!;
         private NumericUpDown WasdRate_UpDown = null!;
         private Label Wasd_Status_Label = null!;
-        private System.Windows.Forms.Timer? wasdTimer;
+        private System.Windows.Forms.Timer? wasdUiTimer;
+        private System.Threading.Timer? wasdWriteTimer;
         private bool lastFocusState;
         private DateTime lastWasdLog = DateTime.MinValue;
-        private const int DisplaySyncMs = 100;
-        private DateTime lastDisplaySync = DateTime.MinValue;
-        private bool pendingYaw, pendingPitch;
-        private float pendingYawValue, pendingPitchValue;
 
         public MainForm() {
             InitializeComponent();
@@ -136,7 +133,9 @@ namespace D2RCameraTool
             };
             WasdRate_UpDown = new NumericUpDown {
                 Location = new Point(566, 47), Width = 56,
-                Minimum = 4, Maximum = 100, Increment = 2,
+                Minimum = WasdCameraControl.MinUpdateIntervalMs,
+                Maximum = WasdCameraControl.MaxUpdateIntervalMs,
+                Increment = 1,
                 Value = WasdCameraControl.DefaultUpdateIntervalMs,
             };
 
@@ -164,7 +163,7 @@ namespace D2RCameraTool
             WasdFocus_CheckBox.CheckedChanged += (_, _) => { Wasd.RequireGameFocus = WasdFocus_CheckBox.Checked; UpdateWasdStatus(); };
             WasdRate_UpDown.ValueChanged += (_, _) => {
                 Wasd.UpdateIntervalMs = (int)WasdRate_UpDown.Value;
-                if (wasdTimer is not null) wasdTimer.Interval = Wasd.UpdateIntervalMs;
+                wasdWriteTimer?.Change(0, Wasd.UpdateIntervalMs);
             };
 
             ApplyWasdToUi();
@@ -194,48 +193,23 @@ namespace D2RCameraTool
         }
 
         /// <summary>
-        /// Called by the WASD tick. The spinner's change handler is detached around the
-        /// assignment because it writes straight back to game memory.
-        ///
-        /// The sync is throttled: repainting a NumericUpDown 60+ times a second while the
-        /// window floats over the game (TopMost) is needless churn and a plausible source of
-        /// on-screen smearing during movement, so the readout updates ~10 times a second and
-        /// always catches up when movement stops.
+        /// Called from the UI timer, never from the write timer. The spinner's change handler
+        /// is detached around the assignment because it writes straight back to game memory.
         /// </summary>
-        internal void SetYawDisplay(float value) {
-            pendingYawValue = value;
-            pendingYaw = true;
-            FlushDisplaysIfDue();
-        }
-
-        internal void SetPitchDisplay(float value) {
-            pendingPitchValue = value;
-            pendingPitch = true;
-            FlushDisplaysIfDue();
-        }
-
-        private void FlushDisplaysIfDue() {
-            if ((DateTime.UtcNow - lastDisplaySync).TotalMilliseconds < DisplaySyncMs) return;
-            FlushDisplays();
-        }
-
-        /// <summary>Writes any pending values to the spin boxes. Cheap no-op when nothing is pending.</summary>
-        internal void FlushDisplays() {
-            if (pendingYaw) {
-                pendingYaw = false;
+        private void ApplyDisplays() {
+            if (Wasd.DisplayYawDirty) {
                 CamPan_UpDown.ValueChanged -= CamPan_UpDown_ValueChanged!;
-                try { CamPan_UpDown.Value = ClampToRange(CamPan_UpDown, (decimal)pendingYawValue); }
+                try { CamPan_UpDown.Value = ClampToRange(CamPan_UpDown, (decimal)Wasd.DisplayYaw); }
                 finally { CamPan_UpDown.ValueChanged += CamPan_UpDown_ValueChanged!; }
             }
 
-            if (pendingPitch) {
-                pendingPitch = false;
+            if (Wasd.DisplayPitchDirty) {
                 PitchSpinner.ValueChanged -= PitchSpinner_ValueChanged!;
-                try { PitchSpinner.Value = ClampToRange(PitchSpinner, (decimal)pendingPitchValue); }
+                try { PitchSpinner.Value = ClampToRange(PitchSpinner, (decimal)Wasd.DisplayPitch); }
                 finally { PitchSpinner.ValueChanged += PitchSpinner_ValueChanged!; }
             }
 
-            lastDisplaySync = DateTime.UtcNow;
+            Wasd.ClearDisplayDirty();
         }
 
         private static decimal ClampToRange(NumericUpDown box, decimal value) =>
@@ -280,29 +254,44 @@ namespace D2RCameraTool
 
             // A dedicated ~60 Hz timer rather than Application.Idle: the WASD feel depends on
             // a steady cadence, and Idle only fires when the message queue happens to drain.
-            wasdTimer = new System.Windows.Forms.Timer { Interval = Wasd.UpdateIntervalMs };
-            wasdTimer.Tick += Wasd_Tick!;
-            wasdTimer.Start();
+            // The camera WRITE runs on a threadpool timer, not a WinForms one: WM_TIMER is
+            // coalesced to the system tick, so intervals below roughly 10 ms are not honoured.
+            // The write rate is exactly the lever that matters here, because the engine
+            // re-asserts its own camera value every frame and we are racing it.
+            wasdWriteTimer = new System.Threading.Timer(_ => WasdTick(), null, 0, Wasd.UpdateIntervalMs);
+
+            // UI refresh only. Repainting the spin boxes at the write rate is needless churn
+            // while the window floats over the game, so the readout lags deliberately.
+            wasdUiTimer = new System.Windows.Forms.Timer { Interval = 100 };
+            wasdUiTimer.Tick += WasdUi_Tick!;
+            wasdUiTimer.Start();
 
             TopMost = TopMost_CheckBox.Checked;
             UpdateWasdStatus();
         }
 
-        private void Wasd_Tick(object sender, EventArgs e) {
-            int pid = Program.ProcessFound && Program.MemLib.IsOpen ? Program.MemLib.ProcessId : 0;
-            bool wrote = Wasd.Tick(pid);
+        /// <summary>Camera write step. Runs on a threadpool timer; must never touch a control.</summary>
+        private void WasdTick() {
+            try {
+                int pid = Program.ProcessFound && Program.MemLib.IsOpen ? Program.MemLib.ProcessId : 0;
+                Wasd.Tick(pid);
+            } catch {
+                // An unhandled exception on a timer thread would take the whole app down.
+            }
+        }
 
-            // Diagnose the gates instead of leaving "nothing happens" unexplained. Logged when
-            // the raw key set changes, and throttled so holding a key does not flood the file.
-            bool keysActive = Wasd.RawAny || wrote;
-            if (keysActive && (DateTime.UtcNow - lastWasdLog).TotalMilliseconds > 700) {
+        /// <summary>UI refresh, on the UI thread and deliberately slower than the write rate.</summary>
+        private void WasdUi_Tick(object sender, EventArgs e) {
+            if (Wasd.DisplayYawDirty || Wasd.DisplayPitchDirty) ApplyDisplays();
+
+            int pid = Program.ProcessFound && Program.MemLib.IsOpen ? Program.MemLib.ProcessId : 0;
+
+            // Diagnose the gates instead of leaving "nothing happens" unexplained.
+            if ((Wasd.RawAny || Wasd.AnyKeyHeld)
+                && (DateTime.UtcNow - lastWasdLog).TotalMilliseconds > 700) {
                 lastWasdLog = DateTime.UtcNow;
                 Program.LogLine("WASD " + Wasd.DescribeGates());
             }
-
-            // Catch the readout up as soon as movement stops, so the throttle never leaves a
-            // stale value on screen.
-            if (!Wasd.AnyKeyHeld) FlushDisplays();
 
             if (Wasd.GameFocused != lastFocusState) {
                 lastFocusState = Wasd.GameFocused;

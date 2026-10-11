@@ -6,24 +6,38 @@ namespace D2RCameraTool;
 /// WASD camera control: hold A/D to swing the view direction, W/S to tilt between ground
 /// and sky.
 ///
-/// Two deliberate choices:
+/// Design notes, in the order the problems actually showed up:
 ///
-///  * movement is TIME-BASED (radians per second) rather than per tick, so the feel does
-///    not change with frame rate or with how often the idle loop happens to run;
-///  * movement only applies while the game owns the foreground window, so the keys cannot
-///    silently rotate the camera while the user is typing somewhere else. The same test
-///    drives optional key blocking, so the game never sees a key we consumed.
+///  * Movement is TIME-BASED (radians per second) rather than per tick, so the feel does
+///    not change with frame rate or with how often the loop happens to run.
+///  * Key state comes from TWO sources, OR-ed: GetAsyncKeyState and the keyboard hook's own
+///    events. Polling alone is not enough, because the hook swallows W/A/S/D and a swallowed
+///    key may never reach the input queue the polling API reads.
+///  * Movement only applies while the game owns the foreground window, so the keys cannot
+///    silently rotate the camera while the user is typing elsewhere.
+///  * The write rate matters. Observed in game: the view shifted and then snapped back, i.e.
+///    the engine re-asserts its own camera value every frame and we are racing it. Writing
+///    more often wins more frames, so the update period is configurable down to 1 ms and the
+///    caller must drive Tick from a timer that is NOT limited to the WM_TIMER granularity.
+///  * Tick deliberately does NOT touch any control: it is called from a timer thread. It
+///    publishes the values it wrote and the UI reads them at its own (throttled) pace.
 /// </summary>
 internal sealed class WasdCameraControl
 {
     /// <summary>Radians per second at the default speed setting.</summary>
     public const double DefaultSpeed = 1.2;
 
-    /// <summary>Camera update period in milliseconds (~62 Hz).</summary>
-    public const int DefaultUpdateIntervalMs = 16;
+    /// <summary>
+    /// Camera update period in milliseconds. 8 measured much smoother than 16 against the
+    /// engine's per-frame re-assert; 1 is allowed so the race can be pushed further.
+    /// </summary>
+    public const int DefaultUpdateIntervalMs = 8;
+    public const int MinUpdateIntervalMs = 1;
+    public const int MaxUpdateIntervalMs = 100;
 
     // Limits are written in DEGREES and converted, so they can be reasoned about without
-    // doing radians in your head. Shared by the WASD keys and the mouse-drag path.
+    // doing radians in your head. Shared by the WASD keys, the mouse-drag path and the spin
+    // box ranges.
     //
     // Yaw is CLAMPED rather than wrapped: wrapping made the value jump from +180 to -180,
     // which reads as the view snapping round. Clamping does not reduce the reachable range --
@@ -52,45 +66,63 @@ internal sealed class WasdCameraControl
     /// <summary>Swallow W/A/S/D before the game sees them, while the game is focused.</summary>
     public bool BlockKeys = true;
 
-    /// <summary>
-    /// How often the camera is updated, in milliseconds. Exposed because the write rate
-    /// relative to the render rate is one of the candidate causes of ghosting while the
-    /// camera moves, and it is the only lever the tool itself controls.
-    /// </summary>
-    public int UpdateIntervalMs = 16;
-
     /// <summary>Only act while the game owns the foreground window.</summary>
     public bool RequireGameFocus = true;
+
+    /// <summary>Camera update period in milliseconds.</summary>
+    public int UpdateIntervalMs = DefaultUpdateIntervalMs;
 
     private readonly Stopwatch _clock = Stopwatch.StartNew();
     private TimeSpan _lastSample;
     private int _gamePid;
 
     /// <summary>
-    /// Keys held according to the keyboard hook's own events.
-    ///
-    /// This exists because polling and swallowing can defeat each other: GetAsyncKeyState
-    /// reads the state a key reaches once it is posted to the input queue, and a low-level
-    /// hook that returns non-zero discards the key before that happens. With blocking on,
-    /// the polling source can therefore report "up" for exactly the keys we are consuming.
-    /// The hook sees the key regardless, so the two sources are OR-ed.
+    /// Keys held according to the keyboard hook's own events. The hook sees a key whether or
+    /// not it swallows it, unlike the polling API.
     /// </summary>
     private readonly HashSet<Keys> _hookHeld = new();
 
     /// <summary>Last raw state from each source, for the diagnostic line.</summary>
     private readonly Dictionary<Keys, (bool async, bool hook)> _lastSource = new();
 
-    public bool GameFocused { get; private set; }
+    // Written from the timer thread, read from the hook callback on the UI thread.
+    private volatile bool _gameFocused;
+
+    /// <summary>
+    /// Last value this control wrote, and how many times the game had replaced it by the time
+    /// of the next write. A non-zero count is direct evidence for the "view shifts then snaps
+    /// back" report: it means the engine re-asserts its own camera value between our writes and
+    /// we are racing it, which is why the update rate changes how smooth this feels.
+    /// </summary>
+    private float _lastYawWritten = float.NaN;
+    private float _lastPitchWritten = float.NaN;
+    public int YawRewrites { get; private set; }
+    public int PitchRewrites { get; private set; }
+
+    public bool GameFocused => _gameFocused;
     public bool AnyKeyHeld { get; private set; }
 
-    // Raw physical key state, sampled before any gating. Kept separate so a diagnostic can
-    // tell "the key was never seen" apart from "the key was seen but a gate stopped it".
     public bool RawA { get; private set; }
     public bool RawD { get; private set; }
     public bool RawW { get; private set; }
     public bool RawS { get; private set; }
     public bool RawAny => RawA || RawD || RawW || RawS;
     public int ForegroundPid { get; private set; }
+
+    /// <summary>Latest yaw/pitch written to the game, for the UI to display when it is due.</summary>
+    public float DisplayYaw { get; private set; }
+    public float DisplayPitch { get; private set; }
+
+    // Separate flags: if only yaw has ever been written, showing DisplayPitch would wrongly
+    // reset the pitch readout to zero.
+    public bool DisplayYawDirty { get; private set; }
+    public bool DisplayPitchDirty { get; private set; }
+
+    public void ClearDisplayDirty()
+    {
+        DisplayYawDirty = false;
+        DisplayPitchDirty = false;
+    }
 
     public void OnKeyPressed(Keys key)
     {
@@ -108,6 +140,12 @@ internal sealed class WasdCameraControl
     /// </summary>
     public void ClearHeldKeys() => _hookHeld.Clear();
 
+    public static bool IsWasdKey(Keys key) => key is Keys.A or Keys.D or Keys.W or Keys.S;
+
+    /// <summary>Whether the keyboard hook should swallow this key right now.</summary>
+    public bool ShouldSuppress(Keys key) =>
+        Enabled && BlockKeys && _gameFocused && IsWasdKey(key);
+
     private bool Down(Keys key)
     {
         bool asyncDown = NativeInput.IsDown(key);
@@ -124,22 +162,16 @@ internal sealed class WasdCameraControl
     /// <summary>Every gate that can stop WASD from moving the camera, for the log.</summary>
     public string DescribeGates() =>
         $"enabled={Enabled} block={BlockKeys} requireFocus={RequireGameFocus} "
-        + $"attachedPid={_gamePid} foregroundPid={ForegroundPid} focused={GameFocused} "
+        + $"intervalMs={UpdateIntervalMs} "
+        + $"attachedPid={_gamePid} foregroundPid={ForegroundPid} focused={_gameFocused} "
         + $"keys[A={SourceReport(Keys.A)} D={SourceReport(Keys.D)} "
         + $"W={SourceReport(Keys.W)} S={SourceReport(Keys.S)}] moved={AnyKeyHeld} "
+        + $"engineRewrites[yaw={YawRewrites} pitch={PitchRewrites}] "
         + $"yawAddr=0x{Program.CamPanValue?.BaseAddress:X} pitchAddr=0x{Program.PitchValue?.BaseAddress:X}";
 
-    /// <summary>Keys this control owns.</summary>
-    public static bool IsWasdKey(Keys key) =>
-        key is Keys.A or Keys.D or Keys.W or Keys.S;
-
-    /// <summary>Whether the keyboard hook should swallow this key right now.</summary>
-    public bool ShouldSuppress(Keys key) =>
-        Enabled && BlockKeys && GameFocused && IsWasdKey(key);
-
     /// <summary>
-    /// Advances the camera by one frame. Returns true when a value was written, so the
-    /// caller can refresh the UI only when something actually changed.
+    /// Advances the camera by one step. Called from a timer thread; never touches a control.
+    /// Returns true when a value was written.
     /// </summary>
     public bool Tick(int gameProcessId)
     {
@@ -147,24 +179,24 @@ internal sealed class WasdCameraControl
         double dt = (now - _lastSample).TotalSeconds;
         _lastSample = now;
 
-        // If the idle loop stalls (a modal dialog, a long scan) do not replay the gap as one
-        // huge jump.
+        // If the loop stalls (a modal dialog, a long scan) do not replay the gap as one huge
+        // jump.
         if (dt > 0.1) dt = 0.1;
         if (dt <= 0) return false;
 
         _gamePid = gameProcessId;
         ForegroundPid = NativeInput.ForegroundProcessId();
-        GameFocused = gameProcessId > 0 && ForegroundPid == gameProcessId;
+        _gameFocused = gameProcessId > 0 && ForegroundPid == gameProcessId;
 
         // Sample the physical keys before any gate, so diagnostics can distinguish a missing
-        // key from a blocked one. Two independent sources, OR-ed - see _hookHeld.
+        // key from a blocked one.
         RawA = Down(Keys.A);
         RawD = Down(Keys.D);
         RawW = Down(Keys.W);
         RawS = Down(Keys.S);
 
         double yawStep = 0, pitchStep = 0;
-        if (Enabled && (!RequireGameFocus || GameFocused))
+        if (Enabled && (!RequireGameFocus || _gameFocused))
         {
             double step = SpeedRadPerSec * dt;
             if (RawA) yawStep -= step;
@@ -178,24 +210,40 @@ internal sealed class WasdCameraControl
         AnyKeyHeld = yawStep != 0 || pitchStep != 0;
         if (!AnyKeyHeld) return false;
 
+        // Without write access the attempt would fail every tick; the status line already says
+        // the attach is read-only, so do not spam it from this thread.
+        if (!Program.WriteAccessAvailable) return false;
+
         bool wrote = false;
 
         if (yawStep != 0 && Program.CamPanValue.BaseAddress > 0)
         {
-            float next = (float)Math.Clamp(Program.CamPanValue.Read() + yawStep, YawMin, YawMax);
+            float cur = Program.CamPanValue.Read();
+            if (!float.IsNaN(_lastYawWritten) && Math.Abs(cur - _lastYawWritten) > 1e-6f)
+                YawRewrites++;   // the engine put its own value back
+
+            float next = (float)Math.Clamp(cur + yawStep, YawMin, YawMax);
             if (Program.TryChangeValue(Program.CamPanValue, next))
             {
-                Program.MainFormInstance.SetYawDisplay(next);
+                _lastYawWritten = next;
+                DisplayYaw = next;
+                DisplayYawDirty = true;
                 wrote = true;
             }
         }
 
         if (pitchStep != 0 && Program.PitchValue.BaseAddress > 0)
         {
-            float next = (float)Math.Clamp(Program.PitchValue.Read() + pitchStep, PitchMin, PitchMax);
+            float cur = Program.PitchValue.Read();
+            if (!float.IsNaN(_lastPitchWritten) && Math.Abs(cur - _lastPitchWritten) > 1e-6f)
+                PitchRewrites++;
+
+            float next = (float)Math.Clamp(cur + pitchStep, PitchMin, PitchMax);
             if (Program.TryChangeValue(Program.PitchValue, next))
             {
-                Program.MainFormInstance.SetPitchDisplay(next);
+                _lastPitchWritten = next;
+                DisplayPitch = next;
+                DisplayPitchDirty = true;
                 wrote = true;
             }
         }

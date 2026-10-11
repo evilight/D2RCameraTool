@@ -243,12 +243,29 @@ namespace D2RCameraTool
             string process = (MainFormInstance.ProcessName_Text.Text ?? string.Empty).Trim();
             if (string.IsNullOrWhiteSpace(process))
             {
-                Report("Type a process name, e.g. D2R.exe");
+                Report("Type a process name (e.g. D2R.exe) or a PID number");
                 return;
             }
 
-            // Try full access first, then fall back to read-only. Locating the camera only
-            // needs read access, so a write refusal must not look like "process not found".
+            // A numeric entry is treated as a PID. On a locked-down host the process
+            // enumeration may only report a couple of dozen processes while OpenProcess by
+            // pid still succeeds, so allowing a direct pid bypasses the lookup entirely.
+            if (int.TryParse(process, out int directPid))
+            {
+                if (TryAttachPid(directPid, out string why))
+                {
+                    ProcessFound = true;
+                    MainFormInstance.ProcessName_Text.Enabled = false;
+                    Report(why);
+                    PlayBeepSound();
+                }
+                else
+                {
+                    Report($"Waiting for pid {directPid}: {why}");
+                }
+                return;
+            }
+
             if (MemLib.OpenByName(process, writeAccess: true))
             {
                 ProcessFound = true;
@@ -271,8 +288,31 @@ namespace D2RCameraTool
             {
                 // Previously this returned silently, so the label sat on its initial text
                 // forever and the tool looked hung. Always say why.
-                Report($"Waiting for '{process}': {MemLib.LastLookupNote}");
+                Report($"Waiting for '{process}': {MemLib.LastLookupNote} "
+                       + "- if the process list looks too short, type the game's PID number instead");
             }
+        }
+
+        /// <summary>Attaches to an explicit pid, preferring read/write and falling back to read-only.</summary>
+        private static bool TryAttachPid(int pid, out string message)
+        {
+            if (MemLib.Open(pid, writeAccess: true))
+            {
+                WriteAccessAvailable = true;
+                message = $"Process found! pid {pid} (read/write)";
+                return true;
+            }
+            if (MemLib.Open(pid, writeAccess: false))
+            {
+                WriteAccessAvailable = false;
+                message = $"Process found pid {pid}, READ-ONLY - camera can be located but "
+                          + "not modified (write refused; run as administrator)";
+                return true;
+            }
+            message = MemLib.LastOpenError == 5
+                ? "OpenProcess denied (err 5) - run the tool as administrator"
+                : $"OpenProcess failed (err {MemLib.LastOpenError})";
+            return false;
         }
 
         /// <summary>

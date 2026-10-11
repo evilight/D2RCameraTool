@@ -13,7 +13,11 @@ namespace D2RCameraTool
         public static bool IsMouseZoomPressed;
 
         
-        private static readonly string INI_FILE_NAME = "settings.ini";
+        // Next to the executable, not the current working directory: a shortcut whose
+        // "Start in" differs, or launching via a shell from another folder, would otherwise
+        // silently use (or fail to find) a different settings.ini.
+        private static readonly string INI_FILE_NAME =
+            Path.Combine(AppContext.BaseDirectory, "settings.ini");
 
         private static AppConfig IniFile;
         private static CameraPreset[] PresetsArray;

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -16,8 +16,11 @@ namespace D2RCameraTool
         public Dictionary<string, string> Load() {
             Dictionary<string, string> data = new Dictionary<string, string>();
 
+            // Missing file is normal on first run: fall back to built-in defaults rather
+            // than blocking startup with a modal dialog. The original called
+            // MessageBox.Show here, and because the path was relative and settings.ini was
+            // not shipped next to the executable, a fresh install could not start at all.
             if (!File.Exists(filePath)) {
-                MessageBox.Show("INI file does not exist.");
                 return data;
             }
 
@@ -39,10 +42,15 @@ namespace D2RCameraTool
         }
 
         public void Save(Dictionary<string, string> data) {
-            using (StreamWriter writer = new StreamWriter(filePath)) {
-                foreach (var kvp in data) {
-                    writer.WriteLine($"{kvp.Key}={kvp.Value}");
+            try {
+                using (StreamWriter writer = new StreamWriter(filePath)) {
+                    foreach (var kvp in data) {
+                        writer.WriteLine($"{kvp.Key}={kvp.Value}");
+                    }
                 }
+            } catch (Exception ex) {
+                // A read-only install directory must not take the app down on exit.
+                System.Diagnostics.Debug.WriteLine("could not save settings: " + ex.Message);
             }
         }
     }

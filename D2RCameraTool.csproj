@@ -14,9 +14,16 @@
     <LangVersion>latest</LangVersion>
   </PropertyGroup>
 
+  <!-- Ship the files the tool needs at runtime. settings.ini was previously absent from
+       the publish output, so a fresh copy could not start; note that a plain
+       <None Remove="..."/> would cancel the Update below and silently drop the .CT too. -->
   <ItemGroup>
-    <None Remove="D2R.1.6.77312.exe" />
-    <None Remove="D2RCamera.CT" />
+    <None Update="settings.ini">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="D2RCamera.CT">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
   <!-- Memory.dll is intentionally gone: it was a prebuilt binary (unpatchable, and a

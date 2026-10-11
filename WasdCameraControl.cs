@@ -169,7 +169,7 @@ internal sealed class WasdCameraControl
     /// <summary>Every gate that can stop WASD from moving the camera, for the log.</summary>
     public string DescribeGates() =>
         $"enabled={Enabled} block={BlockKeys} requireFocus={RequireGameFocus} "
-        + $"intervalMs={UpdateIntervalMs} measuredHz={MeasuredHz:F0} "
+        + $"intervalMs={UpdateIntervalMs} measuredHz={MeasuredHz:F0} fineTimer={TimerResolution.IsRaised} "
         + $"attachedPid={_gamePid} foregroundPid={ForegroundPid} focused={_gameFocused} "
         + $"keys[A={SourceReport(Keys.A)} D={SourceReport(Keys.D)} "
         + $"W={SourceReport(Keys.W)} S={SourceReport(Keys.S)}] moved={AnyKeyHeld} "

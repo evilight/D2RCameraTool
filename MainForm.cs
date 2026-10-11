@@ -273,6 +273,10 @@ namespace D2RCameraTool
         /// <summary>Camera write step. Runs on a threadpool timer; must never touch a control.</summary>
         private void WasdTick() {
             try {
+                // Hold a 1 ms system tick only while the feature is actually being used.
+                if (Wasd.Enabled && Wasd.GameFocused) TimerResolution.RequestFineResolution();
+                else TimerResolution.Release();
+
                 int pid = Program.ProcessFound && Program.MemLib.IsOpen ? Program.MemLib.ProcessId : 0;
                 Wasd.Tick(pid);
             } catch {

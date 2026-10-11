@@ -161,6 +161,25 @@ namespace D2RCameraTool
                 }
             }
 
+            // Step one camera angle across its whole range, capturing the game window at every
+            // step. Writing a value and looking at the result is the only way to characterise what
+            // the engine does with these numbers, and doing it here keeps every step in one
+            // process with no timing to synchronise.
+            string? sweepArg = ArgValue(args, "--sweep");
+            if (sweepArg is not null)
+            {
+                if (!writeAccess)
+                {
+                    Log("--sweep needs --allow-write");
+                }
+                else
+                {
+                    string dir = ArgValue(args, "--sweep-out") ?? "sweep";
+                    int n = int.TryParse(ArgValue(args, "--sweep-steps"), out int sn) && sn > 1 ? sn : 16;
+                    RunValueSweep(sweepArg, dir, n, Log);
+                }
+            }
+
             string json = JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true });
             try
             {
@@ -557,6 +576,125 @@ namespace D2RCameraTool
                 return false;
             }
             return change.Write(newValue);
+        }
+
+        [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+        private static extern IntPtr FindWindowW(string? cls, string? title);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        private struct RECT { public int Left, Top, Right, Bottom; }
+
+        /// <summary>
+        /// Steps one camera value from its current setting to the top of its range and then down to
+        /// the bottom, capturing the game window at each step.
+        ///
+        /// Writing a value and looking at what happens is the only conclusive way to characterise
+        /// these numbers - reading them back only says whether the write stuck, not what the engine
+        /// does with it afterwards. Doing the whole sweep here keeps every step in one process, so
+        /// there is no timing to synchronise between a write and a screenshot.
+        /// </summary>
+        public static void RunValueSweep(string which, string outDir, int steps, Action<string> log)
+        {
+            FloatValue? value = which.ToLowerInvariant() switch
+            {
+                "pitch" => PitchValue,
+                "yaw" or "pan" => CamPanValue,
+                "roll" => RollValue,
+                "height" => CamHeightValue,
+                "zoom" => ZoomValue,
+                _ => null,
+            };
+            if (value is null || value.BaseAddress <= 0)
+            {
+                log($"sweep: unknown value '{which}' (pitch, yaw, roll, height, zoom) or it is not located");
+                return;
+            }
+
+            (float lo, float hi) = which.ToLowerInvariant() switch
+            {
+                "pitch" => (-1.5533f, 1.5533f),
+                "yaw" or "pan" => (-3.14159f, 3.14159f),
+                "roll" => (-1.5533f, 1.5533f),
+                "height" => (-2.0f, 2.0f),
+                _ => (value.Read() - 1.0f, value.Read() + 1.0f),
+            };
+
+            IntPtr hwnd = FindWindowW(null, "Diablo II: Resurrected");
+            if (hwnd == IntPtr.Zero) hwnd = FindWindowW(null, "Diablo II: Resurrected ");
+            if (hwnd == IntPtr.Zero)
+            {
+                log("sweep: could not find the game window by title; nothing was captured");
+                return;
+            }
+
+            Directory.CreateDirectory(outDir);
+            log($"sweep: {which} from {value.Read():F4} to {hi:F4} and back to {lo:F4}, "
+                + $"{steps} steps each way, capturing every step");
+
+            float start = value.Read();
+            var targets = new List<float>();
+            for (int i = 0; i <= steps; i++) targets.Add(start + (hi - start) * i / steps);
+            for (int i = 1; i <= steps * 2; i++) targets.Add(hi + (lo - hi) * i / (steps * 2));
+
+            int n = 0;
+            // FloatValue.Write only touches the primary copy. The WASD control writes the mirrors
+            // as well, and it has to: the camera lives at more than one address and the renderer
+            // may be reading a copy we did not update, in which case a sweep would show no change
+            // at all and look like "the engine ignores writes".
+            int mirrorOffset = which.ToLowerInvariant() switch
+            {
+                "pitch" => 0x0,
+                "height" => 0x4,
+                "yaw" or "pan" => 0x8,
+                "roll" => -0x4,
+                _ => int.MinValue,
+            };
+
+            foreach (float t in targets)
+            {
+                value.Write(t);
+                if (mirrorOffset != int.MinValue)
+                    foreach (long m in CameraMirrors)
+                        MemLib.WriteFloat((ulong)(m + mirrorOffset), t);
+                // Re-assert: the engine occasionally puts its own value back, and a step that was
+                // silently overridden would look like a rendering effect rather than a lost write.
+                Thread.Sleep(120);
+                value.Write(t);
+                if (mirrorOffset != int.MinValue)
+                    foreach (long m in CameraMirrors)
+                        MemLib.WriteFloat((ulong)(m + mirrorOffset), t);
+                Thread.Sleep(230);
+
+                float readBack = value.Read();
+                string path = Path.Combine(outDir, $"{which}_{n:000}_{t:+0.0000;-0.0000}.png");
+                try
+                {
+                    GetWindowRect(hwnd, out RECT r);
+                    int cw = Math.Min(880, r.Right - r.Left);
+                    int ch = Math.Min(500, r.Bottom - r.Top);
+                    int cx = r.Left + ((r.Right - r.Left) - cw) / 2;
+                    int cy = r.Top + ((r.Bottom - r.Top) - ch) / 2;
+                    using var bmp = new Bitmap(cw, ch);
+                    using (var g = Graphics.FromImage(bmp))
+                        g.CopyFromScreen(cx, cy, 0, 0, new Size(cw, ch));
+                    bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+                }
+                catch (Exception ex)
+                {
+                    log($"sweep: capture failed at step {n}: {ex.Message}");
+                }
+
+                log($"sweep step {n,3}: wrote {t,+8:F4}  read back {readBack,+8:F4}  "
+                    + $"delta {readBack - t,+8:F4}  -> {Path.GetFileName(path)}");
+                n++;
+            }
+
+            value.Write(start);
+            Thread.Sleep(200);
+            log($"sweep: restored {which} to {start:F4} (reads {value.Read():F4})");
         }
 
         public static bool TryChangeZoom(float zoom, NumericUpDown? spinner = null)

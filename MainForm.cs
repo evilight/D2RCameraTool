@@ -51,6 +51,9 @@ namespace D2RCameraTool
         private GroupBox SessionGroup = null!;
         private Button ResetAll_Button = null!;
         private Button OverShoulder_Button = null!;
+        private Button SweepPitch_Button = null!;
+        private Button SweepYaw_Button = null!;
+        private Button SweepRoll_Button = null!;
         private System.Windows.Forms.Timer? wasdUiTimer;
         private System.Threading.Timer? wasdWriteTimer;
         private bool lastFocusState;
@@ -292,9 +295,25 @@ namespace D2RCameraTool
                 Location = new Point(142, 14),
                 Size = new Size(150, 26),
             };
+            SweepPitch_Button = new Button {
+                Text = "Sweep pitch",
+                Location = new Point(304, 14),
+                Size = new Size(110, 26),
+            };
+            SweepYaw_Button = new Button {
+                Text = "Sweep yaw",
+                Location = new Point(422, 14),
+                Size = new Size(110, 26),
+            };
+            SweepRoll_Button = new Button {
+                Text = "Sweep roll",
+                Location = new Point(540, 14),
+                Size = new Size(110, 26),
+            };
 
             SessionGroup.Controls.AddRange(new Control[] {
                 ResetAll_Button, OverShoulder_Button,
+                SweepPitch_Button, SweepYaw_Button, SweepRoll_Button,
             });
 
             ClientSize = new Size(ClientSize.Width, ClientSize.Height + extra);
@@ -303,6 +322,47 @@ namespace D2RCameraTool
 
             ResetAll_Button.Click += ResetAllValues_Click;
             OverShoulder_Button.Click += OverShoulder_Click;
+            SweepPitch_Button.Click += (_, _) => StartSweep("pitch");
+            SweepYaw_Button.Click += (_, _) => StartSweep("yaw");
+            SweepRoll_Button.Click += (_, _) => StartSweep("roll");
+        }
+
+        /// <summary>
+        /// Steps one camera angle across its whole range and captures the game window at each
+        /// step. It has to run inside this process: the tool holds an elevated handle to the game
+        /// and nothing else can open it for writing.
+        /// </summary>
+        private void StartSweep(string which) {
+            if (!Program.ValuesFound || Program.PitchValue.BaseAddress <= 0) {
+                Program.LogLine($"Sweep {which} requested before the camera was located");
+                return;
+            }
+            if (!Program.WriteAccessAvailable) {
+                Program.LogLine($"Sweep {which} needs write access - run the tool as administrator");
+                return;
+            }
+
+            SweepPitch_Button.Enabled = SweepYaw_Button.Enabled = SweepRoll_Button.Enabled = false;
+            SweepPitch_Button.Text = SweepYaw_Button.Text = SweepRoll_Button.Text = "sweeping...";
+            string dir = Path.Combine(AppContext.BaseDirectory, "sweep_" + which);
+            Program.LogLine($"Sweep {which}: writing to {dir}");
+
+            System.Threading.Tasks.Task.Run(() => {
+                try {
+                    Program.RunValueSweep(which, dir, 16, Program.LogLine);
+                } catch (Exception ex) {
+                    Program.LogLine("Sweep failed: " + ex.Message);
+                } finally {
+                    try {
+                        BeginInvoke(() => {
+                            SweepPitch_Button.Enabled = SweepYaw_Button.Enabled = SweepRoll_Button.Enabled = true;
+                            SweepPitch_Button.Text = "Sweep pitch";
+                            SweepYaw_Button.Text = "Sweep yaw";
+                            SweepRoll_Button.Text = "Sweep roll";
+                        });
+                    } catch { }
+                }
+            });
         }
 
         /// <summary>Pushes the control's settings into the widgets (used after loading the ini).</summary>

@@ -156,18 +156,30 @@ internal static class CameraLocator
         {
             c.LegacyExactFields = CountLegacyMatches(c, exactBytes: true, mem, c.Base);
             c.Score = c.LegacyExactFields * 1000;
+            c.Score -= RoundnessPenalty(c.Roll) + RoundnessPenalty(c.Pitch)
+                     + RoundnessPenalty(c.Height) + RoundnessPenalty(c.Yaw);
         }
 
-        var probe = result.Candidates
-            .OrderByDescending(c => c.Score)
-            .Take(ChurnProbeCount)
-            .ToList();
+        // Probe churn on the best candidates, and - when nothing matches the legacy
+        // values - on an even sample across the whole list, because with no legacy
+        // anchor the scan order is meaningless and only churn discriminates.
+        int legacyMax = result.Candidates.Max(c => c.LegacyExactFields);
+        List<CameraCandidate> probe;
+        if (legacyMax > 0)
+        {
+            probe = result.Candidates.OrderByDescending(c => c.Score)
+                                     .Take(ChurnProbeCount).ToList();
+        }
+        else
+        {
+            probe = EvenSample(result.Candidates, ChurnProbeCount * 4);
+            log($"  no legacy match; probing churn across {probe.Count} sampled candidates");
+        }
 
         if (probe.Count > 1)
         {
-            log($"  measuring neighbourhood churn on top {probe.Count} ...");
-            Thread.Sleep(700);
-            foreach (var c in probe) c.Churn = MeasureChurn(mem, c, ct);
+            log($"  measuring neighbourhood churn on {probe.Count} candidates ...");
+            MeasureChurnBatch(mem, probe, ct);
         }
 
         foreach (var c in result.Candidates)
@@ -217,6 +229,49 @@ internal static class CameraLocator
         return n;
     }
 
+    /// <summary>
+    /// Churn for many candidates with a single sleep. Sleeping per candidate made a
+    /// few hundred probes take minutes; batching makes it one interval total.
+    /// </summary>
+    private static void MeasureChurnBatch(Win32Memory mem, List<CameraCandidate> probe,
+                                          CancellationToken ct)
+    {
+        var before = new Dictionary<ulong, byte[]>();
+        foreach (var c in probe)
+        {
+            ulong start = c.Base >= (ulong)ChurnWindow ? c.Base - (ulong)ChurnWindow : 0;
+            var b = mem.ReadBytes(start, ChurnWindow * 2);
+            if (b is not null) before[c.Base] = b;
+        }
+
+        Thread.Sleep(600);
+        ct.ThrowIfCancellationRequested();
+
+        foreach (var c in probe)
+        {
+            if (!before.TryGetValue(c.Base, out var a)) { c.Churn = -1; continue; }
+            ulong start = c.Base >= (ulong)ChurnWindow ? c.Base - (ulong)ChurnWindow : 0;
+            var b = mem.ReadBytes(start, ChurnWindow * 2);
+            if (b is null || b.Length != a.Length) { c.Churn = -1; continue; }
+            int diff = 0;
+            for (int i = 0; i < a.Length; i++) if (a[i] != b[i]) diff++;
+            c.Churn = diff;
+        }
+    }
+
+    private static List<CameraCandidate> EvenSample(List<CameraCandidate> src, int count)
+    {
+        if (src.Count <= count) return new List<CameraCandidate>(src);
+        var outp = new List<CameraCandidate>(count);
+        double step = (double)src.Count / count;
+        for (int i = 0; i < count; i++)
+        {
+            int idx = (int)(i * step);
+            if (idx < src.Count) outp.Add(src[idx]);
+        }
+        return outp;
+    }
+
     private static int MeasureChurn(Win32Memory mem, CameraCandidate c, CancellationToken ct)
     {
         ulong start = c.Base >= (ulong)ChurnWindow ? c.Base - (ulong)ChurnWindow : 0;
@@ -239,8 +294,23 @@ internal static class CameraLocator
         if (MathF.Abs(roll) > 0.60f) return false;
         if (height < -0.10f || height > 1.50f) return false;
         if (MathF.Abs(yaw) > 1.40f) return false;
-        // Reject members of an arithmetic progression (trig / lookup tables).
         return true;
+    }
+
+    /// <summary>
+    /// Penalty for values that look like table constants rather than measured camera
+    /// parameters. The real fields have full mantissas; round values (0, 0.5, 1.0,
+    /// powers of two, few-significant-bit fractions) dominate false positives.
+    /// </summary>
+    private static int RoundnessPenalty(float v)
+    {
+        if (v == 0f) return 40;
+        uint mantissa = (uint)BitConverter.SingleToInt32Bits(MathF.Abs(v)) & 0x7FFFFFu;
+        if (mantissa == 0) return 40;              // power of two
+        if ((mantissa & 0x7FFFFu) == 0) return 20; // ~4 significant bits
+        if ((mantissa & 0x7FFFu) == 0) return 8;
+        if ((mantissa & 0x1FFu) == 0) return 3;
+        return 0;
     }
 
     /// <summary>True when the surrounding floats advance by a near-constant step.</summary>

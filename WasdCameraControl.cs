@@ -25,7 +25,15 @@ namespace D2RCameraTool;
 internal sealed class WasdCameraControl
 {
     /// <summary>Radians per second at the default speed setting.</summary>
-    public const double DefaultSpeed = 1.2;
+    /// <summary>
+    /// Radians per second of yaw and pitch travel.
+    ///
+    /// Measured on the live game: the old value of 1.2 produced exactly 1.2000 rad/s, so the
+    /// control loop was never at fault - it was simply too fast to aim with. 1.2 rad/s is 69
+    /// degrees per second, a full turn in 5.2 seconds, which also means the +/-180 degree clamp is
+    /// reached after five seconds of holding a key. 0.5 gives a full turn in about 12.6 seconds.
+    /// </summary>
+    public const double DefaultSpeed = 0.5;
 
     /// <summary>
     /// Camera update period in milliseconds. Measured in game: 1 ms is the smoothest, 8 ms

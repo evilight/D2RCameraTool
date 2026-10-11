@@ -153,6 +153,8 @@ internal sealed class CameraSampler
     internal static string BuildDiffReport(Sample a, Sample b)
     {
         var reversed = new List<string>();
+        var signFlips = new List<string>();
+        var smallInts = new List<string>();
         var others = new List<(double magnitude, string text)>();
 
         foreach (var kv in b.Words)
@@ -164,35 +166,52 @@ internal sealed class CameraSampler
 
             float fa = BitConverter.ToSingle(BitConverter.GetBytes(wa), 0);
             float fb = BitConverter.ToSingle(BitConverter.GetBytes(wb), 0);
+            int ia = unchecked((int)wa), ib = unchecked((int)wb);
 
             double delta = 0;
             bool angular = false;
-
             if (IsPlausibleAngle(fa) && IsPlausibleAngle(fb))
             {
                 delta = WrapPi(fb - fa);
                 angular = Math.Abs(Math.Abs(delta) - Math.PI) <= NearPiTolerance;
             }
 
-            int ia = unchecked((int)wa), ib = unchecked((int)wb);
-
             if (angular)
             {
                 reversed.Add($"    +0x{off:X6} (0x{(long)b.Base + off:X}) "
                              + $"float {fa:F6} -> {fb:F6}  delta={delta:F6} rad "
                              + $"(reversed; as int {ia} -> {ib})");
+                continue;
             }
-            else
+
+            // A direction vector component reversing looks like v -> -v: same magnitude, opposite
+            // sign. That is invisible in a magnitude-sorted list, because the change is small.
+            if (IsUnitComponent(fa) && IsUnitComponent(fb)
+                && Math.Abs(fa + fb) <= 0.02f * Math.Max(Math.Abs(fa), Math.Abs(fb)))
             {
-                double mag = Math.Abs(fb - fa);
-                others.Add((mag, $"    +0x{off:X6} (0x{(long)b.Base + off:X}) "
-                                 + $"float {fa:F6} -> {fb:F6} (d={fb - fa:F6})  int {ia} -> {ib}"));
+                signFlips.Add($"    +0x{off:X6} (0x{(long)b.Base + off:X}) "
+                              + $"float {fa:F6} -> {fb:F6}  (negated; as int {ia} -> {ib})");
+                continue;
             }
+
+            // The original games stored facing as a small integer direction index, in which case a
+            // reversal is a change of about half the range (e.g. 32 out of 64) rather than pi.
+            if (Math.Abs(ia) <= SmallIntLimit && Math.Abs(ib) <= SmallIntLimit)
+            {
+                string mark = Math.Abs(Math.Abs(ib - ia) - 32) <= 2 ? "  <== near half range" : "";
+                smallInts.Add($"    +0x{off:X6} (0x{(long)b.Base + off:X}) "
+                              + $"int {ia} -> {ib} (d={ib - ia}){mark}");
+                continue;
+            }
+
+            others.Add((Math.Abs(fb - fa), $"    +0x{off:X6} (0x{(long)b.Base + off:X}) "
+                             + $"float {fa:F6} -> {fb:F6} (d={fb - fa:F6})  int {ia} -> {ib}"));
         }
 
         var sb = new StringBuilder();
         sb.AppendLine($"SAMPLE diff #{a.Index} -> #{b.Index}: "
-                      + $"{reversed.Count} value(s) changed by about pi, {others.Count} other change(s)");
+                      + $"{reversed.Count} near-pi, {signFlips.Count} negated, "
+                      + $"{smallInts.Count} small-int, {others.Count} other change(s)");
         sb.AppendLine($"SAMPLE   pose A: yaw={a.Yaw:F6} pitch={a.Pitch:F6} roll={a.Roll:F6} "
                       + $"height={a.Height:F6} zoom={a.Zoom:F6}");
         sb.AppendLine($"SAMPLE   pose B: yaw={b.Yaw:F6} pitch={b.Pitch:F6} roll={b.Roll:F6} "
@@ -200,13 +219,26 @@ internal sealed class CameraSampler
 
         if (reversed.Count > 0)
         {
-            sb.AppendLine("SAMPLE candidates whose angle reversed (most likely the heading):");
+            sb.AppendLine("SAMPLE angle reversed by about pi (heading stored as an angle):");
             foreach (var line in reversed) sb.AppendLine(line);
         }
         else
         {
-            sb.AppendLine("SAMPLE no value reversed by about pi in this window - the heading is "
-                          + "either outside it or not stored as an angle");
+            sb.AppendLine("SAMPLE no angle reversed by about pi");
+        }
+
+        if (signFlips.Count > 0)
+        {
+            sb.AppendLine("SAMPLE value negated with the same magnitude "
+                          + "(heading stored as a direction vector):");
+            foreach (var line in signFlips) sb.AppendLine(line);
+        }
+
+        if (smallInts.Count > 0)
+        {
+            sb.AppendLine("SAMPLE small integer changed "
+                          + "(heading stored as a direction index would land near half range):");
+            foreach (var line in smallInts) sb.AppendLine(line);
         }
 
         if (others.Count > 0)
@@ -218,6 +250,19 @@ internal sealed class CameraSampler
 
         return sb.ToString().TrimEnd();
     }
+
+    /// <summary>
+    /// A component of a unit vector: direction vectors are stored normalised, so their components
+    /// live in [-1, 1] and a reversal stays inside that range.
+    /// </summary>
+    private static bool IsUnitComponent(float v)
+    {
+        if (float.IsNaN(v) || float.IsInfinity(v)) return false;
+        return Math.Abs(v) > 0.05f && Math.Abs(v) <= 1.001f;
+    }
+
+    /// <summary>Range for "small integer" - a direction index is a handful of bits, not a count.</summary>
+    private const int SmallIntLimit = 4096;
 
     /// <summary>
     /// A float worth treating as an angle. Real angles live roughly in [-2pi, 2pi]; values far
@@ -245,7 +290,7 @@ internal sealed class CameraSampler
             string path = Path.Combine(AppContext.BaseDirectory, RawDumpFile);
             var sb = new StringBuilder();
             sb.AppendLine($"=== sample #{s.Index}  {s.At:yyyy-MM-dd HH:mm:ss}  base=0x{s.Base:X}  "
-                          + $"radius=0x{s.Words.Count switch { 0 => 0, _ => WindowRadius }}");
+                          + $"radius=0x{WindowRadius:X}");
             sb.AppendLine($"# yaw={s.Yaw.ToString("F6", CultureInfo.InvariantCulture)} "
                           + $"pitch={s.Pitch.ToString("F6", CultureInfo.InvariantCulture)} "
                           + $"roll={s.Roll.ToString("F6", CultureInfo.InvariantCulture)} "

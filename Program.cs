@@ -80,25 +80,49 @@ namespace D2RCameraTool
             // Things that must NOT be reported as a heading.
             a.Words[0x008] = Bits(1234.5f);   // a coordinate
             b.Words[0x008] = Bits(1236.0f);
-            a.Words[0x00C] = 42u;             // a counter
+            a.Words[0x00C] = 42u;             // a small int, but nowhere near half range
             b.Words[0x00C] = 43u;
             a.Words[0x010] = Bits(0.5f);      // unchanged
             b.Words[0x010] = Bits(0.5f);
 
+            // A direction vector component reversing: v -> -v.
+            a.Words[0x014] = Bits(0.7071f);
+            b.Words[0x014] = Bits(-0.7071f);
+
+            // A direction index reversing: 8 -> 40 out of 64, i.e. half the range. Written as raw
+            // words, not as float bit patterns - a word cannot be both float 8.0 and integer 8.
+            a.Words[0x018] = 8u;
+            b.Words[0x018] = 40u;
+
             string report = CameraSampler.BuildDiffReport(a, b);
 
-            // Only the reversed-candidates section matters for the assertion. The coordinate and
-            // the counter are EXPECTED to appear further down as context - the point is that they
-            // are not claimed as headings.
-            int cut = report.IndexOf("largest other changes", StringComparison.Ordinal);
-            string reversedSection = cut >= 0 ? report.Substring(0, cut) : report;
-            bool ok = reversedSection.Contains("0x000000") && reversedSection.Contains("0x000004")
-                      && !reversedSection.Contains("0x000008") && !reversedSection.Contains("0x00000C");
+            // Check each section only for the offsets it is responsible for: the coordinate and
+            // the counter are EXPECTED to appear further down as context.
+            static string Section(string text, string from, string? to)
+            {
+                int start = text.IndexOf(from, StringComparison.Ordinal);
+                if (start < 0) return string.Empty;
+                int end = to is null ? text.Length : text.IndexOf(to, start, StringComparison.Ordinal);
+                return end < 0 ? text.Substring(start) : text.Substring(start, end - start);
+            }
+
+            string piSection = Section(report, "angle reversed by about pi", "SAMPLE value negated");
+            string negSection = Section(report, "value negated", "SAMPLE small integer");
+            string intSection = Section(report, "small integer", "SAMPLE largest other");
+
+            bool ok = piSection.Contains("0x000000") && piSection.Contains("0x000004")
+                      && !piSection.Contains("0x000008") && !piSection.Contains("0x00000C")
+                      && negSection.Contains("0x000014")
+                      // the direction-index change is marked half-range, an unrelated small
+                      // integer that also moved is not
+                      && intSection.Contains("int 8 -> 40 (d=32)  <== near half range")
+                      && !intSection.Contains("int 42 -> 43 (d=1)  <== near half range");
 
             var text = new System.Text.StringBuilder();
             text.AppendLine(ok ? "SELFTEST PASS" : "SELFTEST FAIL");
             text.AppendLine(ok
-                ? "  both reversed angles flagged; coordinate and counter NOT flagged"
+                ? "  near-pi angles, a negated unit component and a half-range integer "
+                  + "all classified correctly; coordinate and counter not claimed as headings"
                 : "  expectations not met, see the report below");
             text.AppendLine();
             text.AppendLine(report);

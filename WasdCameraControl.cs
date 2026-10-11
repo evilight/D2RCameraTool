@@ -28,10 +28,11 @@ internal sealed class WasdCameraControl
     public const double DefaultSpeed = 1.2;
 
     /// <summary>
-    /// Camera update period in milliseconds. 8 measured much smoother than 16 against the
-    /// engine's per-frame re-assert; 1 is allowed so the race can be pushed further.
+    /// Camera update period in milliseconds. Measured in game: 1 ms is the smoothest, 8 ms
+    /// visibly worse, 16 ms worse still. The step per write is speed * interval, so a shorter
+    /// interval means a smaller step; that is what removes the judder, not responsiveness.
     /// </summary>
-    public const int DefaultUpdateIntervalMs = 8;
+    public const int DefaultUpdateIntervalMs = 1;
     public const int MinUpdateIntervalMs = 1;
     public const int MaxUpdateIntervalMs = 100;
 
@@ -90,14 +91,20 @@ internal sealed class WasdCameraControl
 
     /// <summary>
     /// Last value this control wrote, and how many times the game had replaced it by the time
-    /// of the next write. A non-zero count is direct evidence for the "view shifts then snaps
-    /// back" report: it means the engine re-asserts its own camera value between our writes and
-    /// we are racing it, which is why the update rate changes how smooth this feels.
+    /// of the next write. Measured against D2R 3.0.91636 this stays at 0 even at a 1 ms
+    /// interval, i.e. the engine does NOT re-assert this field every frame. Kept because it
+    /// is the direct test for that, and because it would catch the behaviour returning.
     /// </summary>
     private float _lastYawWritten = float.NaN;
     private float _lastPitchWritten = float.NaN;
     public int YawRewrites { get; private set; }
     public int PitchRewrites { get; private set; }
+
+    // Actual achieved tick rate. A requested interval is a request: Windows timer resolution
+    // can silently floor it, so the rate is measured rather than assumed.
+    private int _rateTicks;
+    private double _rateWindowStartMs;
+    public double MeasuredHz { get; private set; }
 
     public bool GameFocused => _gameFocused;
     public bool AnyKeyHeld { get; private set; }
@@ -162,7 +169,7 @@ internal sealed class WasdCameraControl
     /// <summary>Every gate that can stop WASD from moving the camera, for the log.</summary>
     public string DescribeGates() =>
         $"enabled={Enabled} block={BlockKeys} requireFocus={RequireGameFocus} "
-        + $"intervalMs={UpdateIntervalMs} "
+        + $"intervalMs={UpdateIntervalMs} measuredHz={MeasuredHz:F0} "
         + $"attachedPid={_gamePid} foregroundPid={ForegroundPid} focused={_gameFocused} "
         + $"keys[A={SourceReport(Keys.A)} D={SourceReport(Keys.D)} "
         + $"W={SourceReport(Keys.W)} S={SourceReport(Keys.S)}] moved={AnyKeyHeld} "
@@ -183,6 +190,17 @@ internal sealed class WasdCameraControl
         // jump.
         if (dt > 0.1) dt = 0.1;
         if (dt <= 0) return false;
+
+        // Measure the rate actually achieved, so a requested interval that Windows quietly
+        // floors shows up in the log instead of being taken on trust.
+        _rateTicks++;
+        double nowMs = now.TotalMilliseconds;
+        if (_rateWindowStartMs == 0) _rateWindowStartMs = nowMs;
+        else if (nowMs - _rateWindowStartMs >= 1000) {
+            MeasuredHz = _rateTicks * 1000.0 / (nowMs - _rateWindowStartMs);
+            _rateTicks = 0;
+            _rateWindowStartMs = nowMs;
+        }
 
         _gamePid = gameProcessId;
         ForegroundPid = NativeInput.ForegroundProcessId();

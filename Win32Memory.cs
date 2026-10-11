@@ -334,20 +334,56 @@ internal sealed class Win32Memory : IDisposable
                 var chunk = ReadBytes(region.Base + off, n);
                 if (chunk is null) { off += (ulong)n; continue; }
 
-                int limit = chunk.Length - plen;
-                for (int i = 0; i <= limit; i++)
-                {
-                    if (!firstIsWild && chunk[i] != first) continue;
-                    bool ok = true;
-                    for (int j = 0; j < plen; j++)
-                    {
-                        if (mask != null && mask[j] == 0) continue;
-                        if (chunk[i + j] != pattern[j]) { ok = false; break; }
-                    }
-                    if (ok) yield return region.Base + off + (ulong)i;
-                }
+                // The search itself lives in a non-iterator helper: a Span cannot be held
+                // across a yield boundary (CS4007).
+                var matches = new List<int>(2);
+                FindInChunk(chunk, pattern, mask, matches);
+                foreach (int m in matches) yield return region.Base + off + (ulong)m;
+
                 off += (ulong)n;
             }
+        }
+    }
+
+    /// <summary>
+    /// Collects match offsets for one chunk. Uses the vectorised
+    /// <see cref="MemoryExtensions.IndexOf(ReadOnlySpan{byte}, byte)"/> to skip to candidate
+    /// positions; the previous hand-written byte loop needed ~78 s to walk 8.75 GB of live
+    /// game memory and return two hits.
+    /// </summary>
+    private static void FindInChunk(byte[] chunk, byte[] pattern, byte[]? mask, List<int> matches)
+    {
+        int plen = pattern.Length;
+        if (chunk.Length < plen) return;
+
+        ReadOnlySpan<byte> span = chunk;
+        byte first = pattern[0];
+        bool firstIsWild = mask != null && mask[0] == 0;
+        int limit = chunk.Length - plen;
+
+        int i = 0;
+        while (i <= limit)
+        {
+            int pos;
+            if (firstIsWild)
+            {
+                pos = i;
+            }
+            else
+            {
+                int rel = span.Slice(i, limit - i + 1).IndexOf(first);
+                if (rel < 0) return;
+                pos = i + rel;
+            }
+
+            bool ok = true;
+            for (int j = 0; j < plen; j++)
+            {
+                if (mask != null && mask[j] == 0) continue;
+                if (span[pos + j] != pattern[j]) { ok = false; break; }
+            }
+            if (ok) matches.Add(pos);
+            i = pos + 1;
         }
     }
 

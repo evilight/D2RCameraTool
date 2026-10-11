@@ -55,6 +55,7 @@ namespace D2RCameraTool
             string process = ArgValue(args, "--process") ?? "D2R";
             string outPath = ArgValue(args, "--out") ?? "d2rcamera_scan.json";
             bool writeAccess = args.Any(a => a.Equals("--allow-write", StringComparison.OrdinalIgnoreCase));
+            bool forceStructural = args.Any(a => a.Equals("--force-structural", StringComparison.OrdinalIgnoreCase));
             string? pidArg = ArgValue(args, "--pid");
 
             var log = new StringBuilder();
@@ -66,13 +67,16 @@ namespace D2RCameraTool
 
             Log($"D2RCameraTool CLI  process={process}  writeAccess={writeAccess}");
 
+            Win32Memory.Trace = Log;
+
             bool opened = pidArg is not null && int.TryParse(pidArg, out int pid)
                 ? MemLib.Open(pid, writeAccess)
                 : MemLib.OpenByName(process, writeAccess);
 
             if (!opened)
             {
-                Log($"could not open '{process}' (is the game running?)");
+                Log($"could not open '{process}' (win32 err {MemLib.LastOpenError}; "
+                    + "5 = access denied, 87 = bad pid, 0 = process not enumerated)");
                 return 2;
             }
             Log($"attached pid {MemLib.ProcessId}");
@@ -83,7 +87,7 @@ namespace D2RCameraTool
             LocateResult res;
             try
             {
-                res = CameraLocator.Locate(MemLib, Log, cts.Token);
+                res = CameraLocator.Locate(MemLib, Log, cts.Token, forceStructural);
             }
             catch (OperationCanceledException)
             {

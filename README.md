@@ -10,6 +10,53 @@ location version-independent.
 > D2R ships Warden anti-cheat — the loader module exports
 > `g_warden_aegis_crash_callback_export`. Use offline single player only.
 
+## Verified against D2R 3.0.91636
+
+Tested live on build `3.0.91636` (offline single player), not just on synthetic targets.
+
+**The camera constants did not change.** The 1.6-era 12-byte signature still matches the
+real camera, byte for byte:
+
+| field | value | notes |
+|---|---|---|
+| CamRoll | `0.099046` | |
+| CamPitch | `-0.892399` | |
+| CamHeight | `0.239118` | |
+| CamYaw | `0.369644` | this is the view direction |
+
+Found at two addresses 0x170 apart — the controller keeps both a current and a desired
+camera state, and the whole structure is unmistakably a camera (adjacent fields include
+world positions, a `1280 x 720` viewport, clip planes and a `0.707107 / 0.612372 /
+0.866025 / 0.500000` rotation basis).
+
+Zoom was located by the Cheat Engine pattern and read `0.5`; it lives at `pattern + 0x32`
+with a usable range of roughly `(-0.25, 3.0)`.
+
+All four angles and zoom were then confirmed by writing to them and restoring:
+
+| write | observed |
+|---|---|
+| pitch `-0.892399` -> `-1.35` | view tilted sharply toward top-down |
+| zoom `0.5` -> `2.0` | view pulled far back |
+| yaw `0.369644` -> `+1.17` | world rotated about the player — **view direction changed** |
+
+The written values read back unchanged in 114/114 samples during each hold, so the engine
+*reads* these fields rather than re-asserting them from its own controller. That is why
+they can be modified at all.
+
+> Addresses are per-run (heap layout changes on every launch) — the signature is the
+> stable thing, not the address.
+
+### A rule that had to be removed
+
+An earlier revision treated "no churn in the candidate's neighbourhood" as proof that a
+signature hit was a stale copy, escalated to the structural scan, and scored frozen
+candidates at `-1000`. On the live process this **returned the wrong address**: the player
+was standing in the stash, so the camera never moved, and the real camera was demoted below
+thousands of structural decoys. A static camera is normal. The frozen-means-dead penalty is
+now applied only on the structural path, where a changed-constants camera really is expected
+to be live.
+
 ## What changed in this fork
 
 | | Before | Now |

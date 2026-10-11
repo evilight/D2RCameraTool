@@ -66,6 +66,7 @@ internal static class CameraLocator
     public static readonly float DefaultYaw = BitConverter.ToSingle(DefaultYawBytes, 0);
 
     private const int MaxStructuralCandidates = 200_000;
+    private const int PageSize = 4096;
 
     /// <summary>Wide window used for refinement and for the stage-A liveness check.</summary>
     private const int ChurnWindow = 0x200;
@@ -88,7 +89,8 @@ internal static class CameraLocator
     // ------------------------------------------------------------------ public
 
     public static LocateResult Locate(Win32Memory mem, Action<string> log,
-                                      CancellationToken ct = default)
+                                      CancellationToken ct = default,
+                                      bool forceStructural = false)
     {
         var result = new LocateResult();
         if (!mem.IsOpen)
@@ -102,37 +104,50 @@ internal static class CameraLocator
         log($"scannable regions: {regions.Count}, {total / 1e6:F1} MB");
 
         // ---------------------------------------------------------- Stage A
-        log("stage A: legacy 12-byte signature ...");
-        ct.ThrowIfCancellationRequested();
-        var cands = ScanLegacy(mem, regions);
-        log($"  stage A candidates: {cands.Count}");
-
-        string method = cands.Count > 0 ? "legacy signature" : "structural";
-        bool legacyTrusted = cands.Count > 0;
-        bool needStructural = cands.Count == 0;
-
-        if (!needStructural)
+        var cands = new List<CameraCandidate>();
+        string method = "structural";
+        if (!forceStructural)
         {
-            log("  liveness check on stage A candidates ...");
-            if (AnyLive(mem, cands, ct))
+            log("stage A: legacy 12-byte signature ...");
+            ct.ThrowIfCancellationRequested();
+            cands = ScanLegacy(mem, regions);
+            log($"  stage A candidates: {cands.Count}");
+
+            if (cands.Count > 0)
             {
-                log("  at least one stage A candidate churns -> treating the signature as valid");
+                // Liveness is reported but NOT used to reject. Live measurement on D2R 3.0.91636
+                // showed the signature still matches the real camera with the 1.6 values, while
+                // the candidate neighbourhood was completely static -- the player was standing in
+                // the stash. Treating "no churn" as "stale copy" demoted the correct answer below
+                // thousands of structural decoys and returned a wrong address. A static camera is
+                // normal; only a MISSING signature justifies the expensive scan.
+                int live = CountLive(mem, cands, ct);
+                log($"  liveness {live}/{cands.Count} (informational; a static camera is normal)");
+                method = "legacy signature";
             }
             else
             {
-                log("  every stage A candidate is frozen -> stale copies of old constants;"
-                    + " escalating to the structural scan");
-                needStructural = true;
-                legacyTrusted = false;
+                log("  signature absent -> structural scan required");
             }
         }
+
+        bool needStructural = cands.Count == 0;
 
         // ---------------------------------------------------------- Stage B
         if (needStructural)
         {
-            log("stage B: structural scan for camera-shaped quads ...");
+            log("stage B: finding hot pages (the camera struct is continuously written) ...");
             ct.ThrowIfCancellationRequested();
-            var b = StructuralScan(mem, regions, log, ct);
+            var hot = BuildHotPages(mem, regions, log, ct);
+
+            log("stage B: structural scan for camera-shaped quads ...");
+            var b = StructuralScan(mem, regions, hot, log, ct);
+
+            if (b.Count == 0)
+            {
+                log("  hot-page scan found nothing; retrying over all writable memory");
+                b = StructuralScan(mem, regions, null, log, ct);
+            }
             log($"  stage B candidates: {b.Count}");
 
             var seen = new HashSet<ulong>(cands.Select(c => c.Base));
@@ -145,8 +160,7 @@ internal static class CameraLocator
                 added++;
             }
             log($"  merged {added} new candidates (total {cands.Count})");
-
-            method = legacyTrusted ? "legacy+structural" : "structural";
+            method = "structural";
         }
 
         if (cands.Count == 0)
@@ -179,18 +193,10 @@ internal static class CameraLocator
         if (stable.Count > 0) cands = stable;
 
         // ---------------------------------------------------------- Stage D
-        log(legacyTrusted
-            ? "stage D: ranking by legacy match, churn as tie-break ..."
-            : "stage D: ranking by churn (legacy match untrusted after escalation) ...");
+        log("stage D: ranking (exact legacy match dominates, else proximity + liveness) ...");
 
         foreach (var c in cands)
-        {
             c.LegacyExactFields = CountLegacyMatches(mem, c.Base);
-            int legacy = legacyTrusted ? c.LegacyExactFields * 1000 : 0;
-            c.Score = legacy
-                      - RoundnessPenalty(c.Roll) - RoundnessPenalty(c.Pitch)
-                      - RoundnessPenalty(c.Height) - RoundnessPenalty(c.Yaw);
-        }
 
         // Probe churn on EVERY candidate. Sampling was a real bug: with no legacy anchor
         // the true camera is one arbitrary entry among thousands, and an even sample
@@ -203,19 +209,34 @@ internal static class CameraLocator
 
         foreach (var c in cands)
         {
-            // Churn is the strongest liveness signal available; cap it so it cannot
-            // swamp a trustworthy legacy match. Unprobed (-1) must never outrank a
-            // candidate that was actually observed.
             int churn = c.Churn < 0 ? 0 : Math.Min(c.Churn, 500);
-            c.Score += legacyTrusted ? churn : churn * 20;
-            if (c.Churn < 0) c.Score -= 100;
-            if (c.Base % 16 == 0) c.Score += 5;
+            int roundness = RoundnessPenalty(c.Roll) + RoundnessPenalty(c.Pitch)
+                          + RoundnessPenalty(c.Height) + RoundnessPenalty(c.Yaw);
+            int align = c.Base % 16 == 0 ? 5 : 0;
+
+            // Byte-exact constants are overwhelming evidence and always win. Absence of
+            // churn is NOT penalised: a player standing in a menu has a live but static
+            // camera, and punishing that demoted the true camera below structural decoys
+            // during live testing on D2R 3.0.91636.
+            if (c.LegacyExactFields >= 3)
+                c.Score = c.LegacyExactFields * 1000 + churn + align - roundness;
+            else if (c.LegacyExactFields >= 1)
+                c.Score = c.LegacyExactFields * 200 + ProximityScore(c) + churn * 10 + align - roundness;
+            else
+                c.Score = ProximityScore(c) + churn * 20 + align - roundness;
+
+            // The "frozen means dead" penalty applies ONLY to the structural path. There we
+            // are hunting a camera whose constants changed, so a candidate whose whole
+            // neighbourhood is frozen is very likely not it. On the signature path a frozen
+            // camera is normal -- the player may simply be standing in a menu -- and applying
+            // the penalty there demoted the true camera below thousands of decoys on the
+            // live D2R process.
+            if (method == "structural" && c.Churn <= 0) c.Score -= 1000;
         }
 
-        if (!legacyTrusted)
+        if (method == "structural")
         {
-            // No legacy anchor: widen the window on the leaders so churn magnitude,
-            // not the arbitrary scan order, decides.
+            // Widen the window on the leaders so churn magnitude, not scan order, decides.
             var leaders = cands.OrderByDescending(x => x.Score).Take(RefineCount).ToList();
             log($"  refining churn over +-0x{ChurnWindow:X} on top {leaders.Count} ...");
             ChurnPass(mem, leaders, ChurnWindow, (c, v) => c.ChurnWide = v, ct);
@@ -252,8 +273,12 @@ internal static class CameraLocator
         return found;
     }
 
-    /// <summary>True when any candidate's neighbourhood changed (i.e. it is a live struct).</summary>
-    private static bool AnyLive(Win32Memory mem, List<CameraCandidate> cands, CancellationToken ct)
+    /// <summary>
+    /// How many candidates have a changing neighbourhood. Reported for diagnostics only:
+    /// a static camera is normal (the player may be standing in a menu), so this must not
+    /// be used to reject candidates.
+    /// </summary>
+    private static int CountLive(Win32Memory mem, List<CameraCandidate> cands, CancellationToken ct)
     {
         var before = new List<(ulong start, byte[] bytes)>();
         foreach (var c in cands.Take(LivenessProbeLimit))
@@ -262,19 +287,20 @@ internal static class CameraLocator
             var b = mem.ReadBytes(start, ChurnWindow * 2);
             if (b is not null) before.Add((start, b));
         }
-        if (before.Count == 0) return false;
+        if (before.Count == 0) return 0;
 
         Thread.Sleep(500);
         ct.ThrowIfCancellationRequested();
 
+        int live = 0;
         foreach (var (start, a) in before)
         {
             var b = mem.ReadBytes(start, ChurnWindow * 2);
             if (b is null || b.Length != a.Length) continue;
             for (int i = 0; i < a.Length; i++)
-                if (a[i] != b[i]) return true;
+                if (a[i] != b[i]) { live++; break; }
         }
-        return false;
+        return live;
     }
 
     // ------------------------------------------------------------------ helpers
@@ -379,6 +405,24 @@ internal static class CameraLocator
     }
 
     /// <summary>
+    /// Camera parameters move by small amounts between builds; they are not redesigned.
+    /// When the exact legacy bytes are gone, a live candidate whose four values are CLOSE
+    /// to the 1.6-era defaults is far more likely to be the camera than one that merely
+    /// churns — churn alone was ambiguous because an entire 4 KB page goes hot as soon as
+    /// anything on it is written, which made unrelated quads on the same page look live.
+    /// </summary>
+    private static int ProximityScore(CameraCandidate c)
+    {
+        double d = Math.Abs(c.Roll - DefaultRoll) + Math.Abs(c.Pitch - DefaultPitch)
+                 + Math.Abs(c.Height - DefaultHeight) + Math.Abs(c.Yaw - DefaultYaw);
+        if (d < 0.05) return 3000;
+        if (d < 0.20) return 1500;
+        if (d < 0.50) return 700;
+        if (d < 1.00) return 200;
+        return 0;
+    }
+
+    /// <summary>
     /// Small penalty for values that look like table constants rather than measured camera
     /// parameters. Deliberately modest: it only breaks ties, because an earlier version used
     /// weights large enough to outweigh the churn signal and that inverted the ranking.
@@ -407,29 +451,108 @@ internal static class CameraLocator
         return true;
     }
 
+    private static ulong HashPage(byte[] buf, int offset, int len)
+    {
+        ulong h = 1469598103934665603UL;
+        int words = len / 8;
+        for (int i = 0; i < words; i++)
+        {
+            h ^= BitConverter.ToUInt64(buf, offset + i * 8);
+            h *= 1099511628211UL;
+        }
+        return h;
+    }
+
+    /// <summary>
+    /// Finds the 4 KB pages that are actually being written, so the structural scan can skip
+    /// static memory entirely.
+    ///
+    /// This was added after a scale test: with an adversarially dense process the candidate
+    /// cap filled up after 2% of the address space and the scan was silently truncated, so a
+    /// camera planted in the last block was never examined. Restricting the scan to hot pages
+    /// fixes the coverage problem and makes it faster at the same time. The camera struct holds
+    /// a continuously updated position, so its page is hot.
+    /// </summary>
+    private static HashSet<ulong> BuildHotPages(Win32Memory mem, List<MemoryRegion> regions,
+                                                Action<string> log, CancellationToken ct)
+    {
+        var first = new Dictionary<ulong, ulong>();
+        long covered = 0;
+
+        foreach (var r in regions)
+        {
+            if (!r.IsPrivate && !r.IsImage) continue;
+            ulong off = 0;
+            while (off < r.Size)
+            {
+                ct.ThrowIfCancellationRequested();
+                int n = (int)Math.Min((ulong)Win32Memory.ChunkSize, r.Size - off);
+                var blob = mem.ReadBytes(r.Base + off, n);
+                if (blob is not null)
+                {
+                    for (int p = 0; p + PageSize <= blob.Length; p += PageSize)
+                        first[r.Base + off + (ulong)p] = HashPage(blob, p, PageSize);
+                }
+                off += (ulong)n;
+            }
+            covered += (long)r.Size;
+        }
+
+        Thread.Sleep(700);
+        ct.ThrowIfCancellationRequested();
+
+        var hot = new HashSet<ulong>();
+        foreach (var r in regions)
+        {
+            if (!r.IsPrivate && !r.IsImage) continue;
+            ulong off = 0;
+            while (off < r.Size)
+            {
+                ct.ThrowIfCancellationRequested();
+                int n = (int)Math.Min((ulong)Win32Memory.ChunkSize, r.Size - off);
+                var blob = mem.ReadBytes(r.Base + off, n);
+                if (blob is not null)
+                {
+                    for (int p = 0; p + PageSize <= blob.Length; p += PageSize)
+                    {
+                        ulong pa = r.Base + off + (ulong)p;
+                        if (first.TryGetValue(pa, out var old) && old != HashPage(blob, p, PageSize))
+                        {
+                            // include the neighbouring pages: a struct can straddle a boundary
+                            if (pa >= PageSize) hot.Add(pa - PageSize);
+                            hot.Add(pa);
+                            hot.Add(pa + PageSize);
+                        }
+                    }
+                }
+                off += (ulong)n;
+            }
+        }
+
+        log($"  hot pages: {hot.Count} of {first.Count} "
+            + $"({100.0 * hot.Count / Math.Max(1, first.Count):F1}% of {covered / 1e6:F0} MB writable)");
+        return hot;
+    }
+
     private static List<CameraCandidate> StructuralScan(Win32Memory mem,
-        List<MemoryRegion> regions, Action<string> log, CancellationToken ct)
+        List<MemoryRegion> regions, HashSet<ulong>? hotPages, Action<string> log,
+        CancellationToken ct)
     {
         var found = new List<CameraCandidate>();
         bool capped = false;
         long scanned = 0;
         var fbuf = Array.Empty<float>();
 
-        foreach (var region in regions)
+        void ScanRange(ulong lo, ulong hi)
         {
-            // The camera struct lives in writable memory: heap (private) or a writable
-            // image section. Read-only image pages are static data and were the main
-            // source of false positives in the offline analysis.
-            if (!region.IsPrivate && !region.IsImage) continue;
-
-            ulong off = 0;
-            while (off < region.Size)
+            ulong off = lo;
+            while (off < hi && !capped)
             {
                 ct.ThrowIfCancellationRequested();
-                int n = (int)Math.Min((ulong)Win32Memory.ChunkSize, region.Size - off);
-                int pre = off >= 4 ? 4 : 0;
-                int post = (off + (ulong)n + 8 <= region.Size) ? 8 : 0;
-                var blob = mem.ReadBytes(region.Base + off - (ulong)pre, n + pre + post);
+                int n = (int)Math.Min((ulong)Win32Memory.ChunkSize, hi - off);
+                int pre = (off >= lo + 4 && off >= 4) ? 4 : 0;
+                int post = (off + (ulong)n + 8 <= hi) ? 8 : 0;
+                var blob = mem.ReadBytes(off - (ulong)pre, n + pre + post);
                 if (blob is null || blob.Length < 24) { off += (ulong)n; continue; }
 
                 int floatCount = blob.Length / 4;
@@ -451,20 +574,47 @@ internal static class CameraLocator
 
                     found.Add(new CameraCandidate
                     {
-                        Base = region.Base + off - (ulong)pre + (ulong)(i * 4),
+                        Base = off - (ulong)pre + (ulong)(i * 4),
                         Roll = roll, Pitch = pitch, Height = height, Yaw = yaw,
                         Note = "stage B (structural)"
                     });
                     if (found.Count >= MaxStructuralCandidates) { capped = true; break; }
                 }
-                if (capped) break;
                 off += (ulong)n;
             }
-            if (capped) break;
+        }
+
+        if (hotPages is not null)
+        {
+            // Coalesce hot pages into ranges so each read covers a contiguous span.
+            ulong start = 0, end = 0;
+            bool open = false;
+            foreach (var p in hotPages.OrderBy(x => x))
+            {
+                ulong ps = p >= 16 ? p - 16 : 0;
+                ulong pe = p + PageSize + 16;
+                if (!open) { start = ps; end = pe; open = true; }
+                else if (ps <= end) { if (pe > end) end = pe; }
+                else { ScanRange(start, end); start = ps; end = pe; }
+                if (capped) break;
+            }
+            if (open && !capped) ScanRange(start, end);
+        }
+        else
+        {
+            foreach (var region in regions)
+            {
+                // The camera struct lives in writable memory: heap (private) or a writable
+                // image section. Read-only image pages are static data.
+                if (!region.IsPrivate && !region.IsImage) continue;
+                ScanRange(region.Base, region.Base + region.Size);
+                if (capped) break;
+            }
         }
 
         log($"  scanned {scanned / 1e6:F1}M float positions"
-            + (capped ? $" (capped at {MaxStructuralCandidates})" : string.Empty));
+            + (capped ? $" (capped at {MaxStructuralCandidates}; consider the hot-page path)"
+                      : string.Empty));
         return found;
     }
 }

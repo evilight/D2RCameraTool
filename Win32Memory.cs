@@ -35,6 +35,12 @@ internal sealed class Win32Memory : IDisposable
 
     private IntPtr _handle = IntPtr.Zero;
 
+    /// <summary>Optional diagnostic sink so the CLI can explain an OpenProcess failure.</summary>
+    public static Action<string>? Trace;
+
+    /// <summary>Win32 error from the most recent OpenProcess call.</summary>
+    public int LastOpenError { get; private set; }
+
     public int ProcessId { get; private set; }
     public bool IsOpen => _handle != IntPtr.Zero;
     public string ProcessName { get; private set; } = string.Empty;
@@ -43,10 +49,11 @@ internal sealed class Win32Memory : IDisposable
 
     public bool OpenByName(string processName, bool writeAccess = true)
     {
-        var procs = System.Diagnostics.Process.GetProcessesByName(
-            processName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
-                ? processName[..^4]
-                : processName);
+        string bare = processName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
+            ? processName[..^4]
+            : processName;
+        var procs = System.Diagnostics.Process.GetProcessesByName(bare);
+        Trace?.Invoke($"GetProcessesByName('{bare}') -> {procs.Length} process(es)");
         try
         {
             foreach (var p in procs)
@@ -68,10 +75,26 @@ internal sealed class Win32Memory : IDisposable
     public bool Open(int pid, bool writeAccess = true)
     {
         Close();
-        TryEnableDebugPrivilege();
         uint access = PROCESS_QUERY_INFORMATION | PROCESS_VM_READ;
         if (writeAccess) access |= PROCESS_VM_WRITE | PROCESS_VM_OPERATION;
+
+        // Try plainly first. Asking for SeDebugPrivilege up front made OpenProcess fail
+        // with ACCESS_DENIED here while an identical ctypes call from Python succeeded,
+        // so the privilege request is only issued when a plain attempt is refused.
         _handle = Native.OpenProcess(access, false, pid);
+        LastOpenError = Marshal.GetLastWin32Error();
+        bool priv = false;
+
+        if (_handle == IntPtr.Zero && LastOpenError == 5)
+        {
+            priv = TryEnableDebugPrivilege();
+            _handle = Native.OpenProcess(access, false, pid);
+            LastOpenError = Marshal.GetLastWin32Error();
+        }
+
+        Trace?.Invoke($"OpenProcess(pid={pid}, access=0x{access:X}) -> "
+                      + $"{(_handle == IntPtr.Zero ? "NULL" : "handle")} err={LastOpenError} "
+                      + $"debugPrivilegeUsed={priv}");
         if (_handle == IntPtr.Zero) return false;
         ProcessId = pid;
         return true;

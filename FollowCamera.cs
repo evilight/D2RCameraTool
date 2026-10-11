@@ -3,54 +3,44 @@ using System.Diagnostics;
 namespace D2RCameraTool;
 
 /// <summary>
-/// Keeps the camera behind the character, derived from the character's own movement.
+/// Keeps the camera behind the character, but ONLY while the character is standing still.
 ///
-/// In Diablo the character always faces the direction it walks - there is no strafing and no
-/// backpedalling - so the movement direction IS the facing, and the world position is locatable
-/// at a fixed offset from the camera base (base-0x14 x, base-0x10 height, base-0x0c z), verified
-/// across five sessions. A stored heading field exists but lives nowhere near the position, so
-/// anchoring on it never worked reliably; this does not need it.
+/// The restriction is not a refinement, it is the whole design. Diablo converts the screen click
+/// position into a world destination, so rotating the camera moves the world point under the
+/// cursor - which moves the character's destination, which changes its direction, which changes
+/// what this class measures and rotates to. That is a closed feedback loop, and the trace shows it
+/// running: on one walk the measured direction went 0.276 -> 0.4877 -> 1.2123 -> 2.6935 -> 2.841
+/// rad over about nine world units, a near reversal with no click involved, and the position steps
+/// stayed at a constant 3.1 units throughout, so the character was not stopping - it was being
+/// re-aimed by our own rotation.
 ///
-/// The camera SNAPS rather than interpolates, which is the important part. Rotating gradually
-/// while the character walks is disorienting in a click-to-move game: the screen turns under the
-/// player and the meaning of the next click changes while they are aiming it. Instead the
-/// direction is measured from the first real step and the yaw is set to its final value in one
-/// go, so the view is stable for the whole walk.
+/// Writing yaw only when the character is stationary breaks the loop at its weakest point: there
+/// is no movement in flight to disturb, so the rotation cannot feed back into anything. The camera
+/// is corrected once the character arrives, which also places it behind the facing they arrived
+/// with.
 ///
-/// A new click that sends the character elsewhere changes the measured direction, which snaps
-/// the camera again - once, at the start of that walk.
+/// The cost, which cannot be avoided: if the next click sends the character in a different
+/// direction, that walk happens with the camera still aimed at the previous one, so it reads as
+/// diagonal on screen until the character stops again.
 ///
-/// yaw = (+/-direction) + Offset. The sign and the offset are the only two unknowns, and both are
-/// on the panel so they can be tuned while playing.
+/// In Diablo the character always faces the direction it walks - no strafing, no backpedalling -
+/// so the movement direction IS the facing, and it is read from the world position at base-0x14
+/// (x) and base-0x0c (z), an offset verified across five sessions. A stored heading field exists
+/// but lives nowhere near the position, which is why it was abandoned.
 /// </summary>
 internal sealed class FollowCamera
 {
-    /// <summary>
-    /// World units that must accumulate before the direction is measured on a walk already in
-    /// progress. One unit was far too short: the measured direction wandered by up to half a
-    /// radian on a straight walk, and every wobble moved the camera. Three units is about a
-    /// dozen frames, which averages the sampling noise out.
-    /// </summary>
+    /// <summary>World units accumulated while moving before the direction is measured.</summary>
     private const float MoveWindow = 3.0f;
-
-    /// <summary>
-    /// The same, for the first measurement of a new walk, where being prompt matters more than
-    /// being smooth - this is what makes the camera turn at the start of a walk rather than
-    /// halfway through it.
-    /// </summary>
-    private const float StartWindow = 0.5f;
-
-    /// <summary>
-    /// How far the direction must turn before the camera is re-aimed mid-walk. Large, because a
-    /// click that changes direction usually changes it a lot, and anything smaller is noise.
-    /// </summary>
-    private const double TurnThreshold = 0.5;
 
     /// <summary>Per-tick movement below this counts as standing still, in world units.</summary>
     private const float StillStep = 0.02f;
 
     /// <summary>How long without movement before the character counts as having stopped.</summary>
     private const double StillMs = 300;
+
+    /// <summary>How much the walk direction must differ from the camera before it is corrected.</summary>
+    private const double TurnThreshold = 0.2;
 
     public bool Enabled;
     public bool Invert;
@@ -130,51 +120,32 @@ internal sealed class FollowCamera
         if (step > StillStep) _stillMs = 0; else _stillMs += dt;
         _stationary = _stillMs > StillMs;
 
-        // Everything since the last measurement, so a short window still yields a stable angle.
+        // Accumulate the walk direction as the character moves. Measured over three units, which
+        // averages out the sampling noise: at one unit the value wandered by half a radian.
         _accX += stepX;
         _accZ += stepZ;
         float acc = MathF.Sqrt(_accX * _accX + _accZ * _accZ);
-
-        // A new walk: be prompt, because the whole point is to turn the camera at the start of it.
-        bool starting = wasStationary && step > StillStep;
-        float window = starting ? StartWindow : MoveWindow;
-        if (acc < window) return false;
-
-        double measured = Math.Atan2(_accZ, _accX);
-        _accX = 0;
-        _accZ = 0;
-
-        bool snap;
-        string reason;
-
-        if (!_haveDirection || starting)
+        if (acc >= MoveWindow)
         {
-            snap = true;
-            reason = _haveDirection ? "new walk" : "first fix";
-            // Without this the flag stays false forever, every measurement is treated as a first
-            // fix, and the turn threshold below never applies - which is exactly what happened:
-            // 60 snaps in one run, all of them labelled "first fix".
+            _direction = Math.Atan2(_accZ, _accX);
             _haveDirection = true;
-        }
-        else
-        {
-            double change = measured - _direction;
-            while (change > Math.PI) change -= 2 * Math.PI;
-            while (change < -Math.PI) change += 2 * Math.PI;
-
-            // Mid-walk only a real turn moves the camera. The measured direction wanders slightly
-            // even on a straight line, and following that wander is what made the view feel wrong.
-            snap = Math.Abs(change) > TurnThreshold;
-            reason = $"turn {change:F3}";
+            _accX = 0;
+            _accZ = 0;
         }
 
-        if (!snap) return false;
-
-        _direction = measured;
-        _lastReason = reason;
+        // Corrct ONLY once the character has come to rest. Any rotation while it is walking moves
+        // the world point under the cursor, which moves the destination, which changes the
+        // direction - the feedback loop this class exists to avoid.
+        bool justStopped = !wasStationary && _stationary;
+        if (!justStopped || !_haveDirection) return false;
 
         double target = (_direction + Offset) * (Invert ? -1 : 1);
         target = WrapPi(target);
+
+        double change = target - Program.CamPanValue.Read();
+        while (change > Math.PI) change -= 2 * Math.PI;
+        while (change < -Math.PI) change += 2 * Math.PI;
+        if (Math.Abs(change) < TurnThreshold) return false;
 
         if (!Program.TryChangeValue(Program.CamPanValue, (float)target))
         {
@@ -215,8 +186,8 @@ internal sealed class FollowCamera
         }
 
         Program.LogLine(
-            $"Follow snap #{SnapCount} ({reason}): pos=({x:F2},{z:F2}) dir={_direction:F4} "
-            + $"-> yaw={target:F4} mirror={mirror:F4} lag={WrapPi(mirror - target):F4}");
+            $"Follow corrected on arrival #{SnapCount}: pos=({x:F2},{z:F2}) "
+            + $"walked dir={_direction:F4} -> yaw={target:F4} (was {Program.CamPanValue.Read():F4})");
 
         return true;
     }

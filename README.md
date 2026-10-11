@@ -160,8 +160,8 @@ All six settings live in `settings.ini` and are written back when you press Save
 
 ### Session buttons
 
-**Reset all values** puts every camera value back in one click - pitch, yaw, roll and height,
-plus zoom unless `also reset zoom` is unticked. It does **not** exit; closing stays separate.
+**Reset all values** puts every camera value back in one click - pitch, yaw, roll, height and
+zoom. It does **not** exit; closing stays separate.
 
 Use it before you quit. The values are what the locator keys on: leaving pitch or yaw rotated
 means the legacy signature no longer matches on the next launch and the tool falls back to the

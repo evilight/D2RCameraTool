@@ -51,7 +51,6 @@ namespace D2RCameraTool
         private GroupBox SessionGroup = null!;
         private Button ResetAll_Button = null!;
         private Button OverShoulder_Button = null!;
-        private CheckBox ResetZoom_CheckBox = null!;
         private System.Windows.Forms.Timer? wasdUiTimer;
         private System.Threading.Timer? wasdWriteTimer;
         private bool lastFocusState;
@@ -214,8 +213,10 @@ namespace D2RCameraTool
                 restored.AddRange(new[] { "pitch", "yaw", "roll", "height" });
 
                 // Zoom keeps its own guard and its own reset value (0) rather than going through
-                // TryResetValue, matching ZoomReset_Button_Click.
-                if (ResetZoom_CheckBox.Checked && Program.ZoomFound) {
+                // TryResetValue, matching ZoomReset_Button_Click. It is always reset: there is no
+                // reason to leave one of the five values changed while putting the other four
+                // back, and the option only added a way to get that wrong.
+                if (Program.ZoomFound) {
                     Program.ZoomValue.Write(0);
                     Zoom_UpDown.Value = 0;
                     restored.Add("zoom");
@@ -286,18 +287,14 @@ namespace D2RCameraTool
                 Location = new Point(10, 14),
                 Size = new Size(120, 26),
             };
-            ResetZoom_CheckBox = new CheckBox {
-                Text = "also reset zoom", AutoSize = true,
-                Location = new Point(142, 19), Checked = true,
-            };
             OverShoulder_Button = new Button {
                 Text = "Over-shoulder pose",
-                Location = new Point(280, 14),
+                Location = new Point(142, 14),
                 Size = new Size(150, 26),
             };
 
             SessionGroup.Controls.AddRange(new Control[] {
-                ResetAll_Button, ResetZoom_CheckBox, OverShoulder_Button,
+                ResetAll_Button, OverShoulder_Button,
             });
 
             ClientSize = new Size(ClientSize.Width, ClientSize.Height + extra);

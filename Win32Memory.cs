@@ -58,8 +58,13 @@ internal sealed class Win32Memory : IDisposable
         // everything outside the host's own job object, while an identical native
         // Toolhelp32 walk from Python saw the whole session -- the game could not be found
         // at all. The native walk is also the more predictable API here.
+        // Toolhelp32 reports the image name WITH its extension ("D2R.exe"), while the GUI
+        // default and the managed API use the bare name. Compare against both, otherwise
+        // the native walk silently never matches and every call falls through to the slower
+        // managed path.
         var pids = EnumerateProcesses()
-            .Where(p => string.Equals(p.name, bare, StringComparison.OrdinalIgnoreCase))
+            .Where(p => string.Equals(p.name, bare, StringComparison.OrdinalIgnoreCase)
+                     || string.Equals(p.name, bare + ".exe", StringComparison.OrdinalIgnoreCase))
             .Select(p => p.pid)
             .ToList();
         Trace?.Invoke($"Toolhelp32: '{bare}' -> {pids.Count} process(es) [{string.Join(",", pids)}]");

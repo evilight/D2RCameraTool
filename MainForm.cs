@@ -47,6 +47,8 @@ namespace D2RCameraTool
         private CheckBox WasdFocus_CheckBox = null!;
         private NumericUpDown WasdRate_UpDown = null!;
         private Label Wasd_Status_Label = null!;
+        private CheckBox AutoHeight_CheckBox = null!;
+        private Label AutoHeight_Status_Label = null!;
         private GroupBox SessionGroup = null!;
         private Button ResetAll_Button = null!;
         private Button OverShoulder_Button = null!;
@@ -109,7 +111,7 @@ namespace D2RCameraTool
             CamPan_UpDown.Minimum = (decimal)WasdCameraControl.YawMin;
             CamPan_UpDown.Maximum = (decimal)WasdCameraControl.YawMax;
 
-            const int groupH = 98;
+            const int groupH = 124;
             const int extra = groupH + 8;
 
             WasdGroup = new GroupBox {
@@ -167,10 +169,25 @@ namespace D2RCameraTool
                 Size = new Size(Main_Panel.Width - 30, 18),
             };
 
+            // ---- arc compensation ----------------------------------------------------
+            // The camera rides an arc rather than a flat circle, so it sinks below the terrain as
+            // yaw goes negative. Measured on the live game: 0.25 of height brings it back above
+            // ground at -180 degrees, which is the lowest point of the arc.
+            AutoHeight_CheckBox = new CheckBox {
+                Text = "Lift camera at negative yaw", AutoSize = true,
+                Location = new Point(10, 98),
+            };
+            AutoHeight_Status_Label = new Label {
+                AutoSize = false,
+                Location = new Point(230, 100),
+                Size = new Size(Main_Panel.Width - 240, 18),
+            };
+
             WasdGroup.Controls.AddRange(new Control[] {
                 Wasd_CheckBox, speedLabel, WasdSpeed_UpDown, WasdBlock_CheckBox,
                 WasdInvertYaw_CheckBox, WasdInvertPitch_CheckBox, WasdFocus_CheckBox,
                 rateLabel, WasdRate_UpDown, Wasd_Status_Label,
+                AutoHeight_CheckBox, AutoHeight_Status_Label,
             });
 
             ClientSize = new Size(ClientSize.Width, ClientSize.Height + extra);
@@ -183,6 +200,15 @@ namespace D2RCameraTool
             WasdInvertPitch_CheckBox.CheckedChanged += (_, _) => Wasd.InvertPitch = WasdInvertPitch_CheckBox.Checked;
             WasdBlock_CheckBox.CheckedChanged += (_, _) => Wasd.BlockKeys = WasdBlock_CheckBox.Checked;
             WasdFocus_CheckBox.CheckedChanged += (_, _) => { Wasd.RequireGameFocus = WasdFocus_CheckBox.Checked; UpdateWasdStatus(); };
+            AutoHeight_CheckBox.CheckedChanged += (_, _) => {
+                // Capture the height the user actually wants as the base, so the compensation is
+                // applied on top of it rather than fighting whatever the last compensated value
+                // happened to be.
+                Wasd.BaseHeight = (double)CamHeight_UpDown.Value;
+                Wasd.AutoHeight = AutoHeight_CheckBox.Checked;
+                Program.LogLine($"Auto height {(Wasd.AutoHeight ? "on" : "off")}, "
+                                + $"base height {Wasd.BaseHeight:F6}, gain {Wasd.AutoHeightGain:F3}");
+            };
             WasdRate_UpDown.ValueChanged += (_, _) => {
                 Wasd.UpdateIntervalMs = (int)WasdRate_UpDown.Value;
                 wasdWriteTimer?.Change(0, Wasd.UpdateIntervalMs);
@@ -582,6 +608,11 @@ namespace D2RCameraTool
             if (Wasd.DisplayYawDirty || Wasd.DisplayPitchDirty) ApplyDisplays();
             UpdateDegreeBoxes();
 
+            AutoHeight_Status_Label.Text = Wasd.AutoHeight
+                ? $"compensating: +{Wasd.LastHeightCorrection:F4} -> height "
+                  + $"{Wasd.BaseHeight + Wasd.LastHeightCorrection:F4}"
+                : "";
+
             int pid = Program.ProcessFound && Program.MemLib.IsOpen ? Program.MemLib.ProcessId : 0;
 
             // Log the gates only on a transition. Logging on a timer produced a line every
@@ -616,7 +647,11 @@ namespace D2RCameraTool
         }
 
         private void CamHeight_UpDown_ValueChanged(object sender, EventArgs e) {
-            Program.TryChangeValue(Program.CamHeightValue, (float)CamHeight_UpDown.Value, CamHeight_UpDown);
+            // With compensation on, the spinner means "the height I want", and the tick adds the
+            // arc correction on top of it.
+            Wasd.BaseHeight = (double)CamHeight_UpDown.Value;
+            if (!Wasd.AutoHeight)
+                Program.TryChangeValue(Program.CamHeightValue, (float)CamHeight_UpDown.Value, CamHeight_UpDown);
         }
 
         private void PitchReset_Click(object sender, EventArgs e) {
@@ -1021,6 +1056,11 @@ namespace D2RCameraTool
             data["wasd_invert_pitch"] = Wasd.InvertPitch ? "1" : "0";
             data["wasd_block_keys"] = Wasd.BlockKeys ? "1" : "0";
             data["wasd_require_focus"] = Wasd.RequireGameFocus ? "1" : "0";
+
+            data["wasd_yaw_min_deg"] = WasdCameraControl.YawMinDegrees.ToString(CultureInfo.InvariantCulture);
+            data["wasd_yaw_max_deg"] = WasdCameraControl.YawMaxDegrees.ToString(CultureInfo.InvariantCulture);
+            data["wasd_pitch_min_deg"] = WasdCameraControl.PitchMinDegrees.ToString(CultureInfo.InvariantCulture);
+            data["wasd_pitch_max_deg"] = WasdCameraControl.PitchMaxDegrees.ToString(CultureInfo.InvariantCulture);
             data["wasd_update_ms"] = Wasd.UpdateIntervalMs.ToString(CultureInfo.InvariantCulture);
 
             for (int i=0; i<PresetsArray.Length; i++) {
@@ -1083,6 +1123,18 @@ namespace D2RCameraTool
                     case "wasd_require_focus":
                         Wasd.RequireGameFocus = pair.Value == "1";
                         break;
+                    case "wasd_yaw_min_deg":
+                        if (TryParseInvariant(pair.Value, out double ymin)) WasdCameraControl.YawMinDegrees = ymin;
+                        break;
+                    case "wasd_yaw_max_deg":
+                        if (TryParseInvariant(pair.Value, out double ymax)) WasdCameraControl.YawMaxDegrees = ymax;
+                        break;
+                    case "wasd_pitch_min_deg":
+                        if (TryParseInvariant(pair.Value, out double pmin)) WasdCameraControl.PitchMinDegrees = pmin;
+                        break;
+                    case "wasd_pitch_max_deg":
+                        if (TryParseInvariant(pair.Value, out double pmax)) WasdCameraControl.PitchMaxDegrees = pmax;
+                        break;
                     case "wasd_update_ms":
                         if (int.TryParse(pair.Value, out int ms) && ms >= 4 && ms <= 100)
                             Wasd.UpdateIntervalMs = ms;
@@ -1111,6 +1163,26 @@ namespace D2RCameraTool
                 }
                 // MessageBox.Show($"Key: {pair.Key}, Value: {pair.Value}");
             }
+
+            // The limits may have just been changed by the file, and the spin box ranges were set
+            // from the old values during construction. Re-apply them, or the boxes would still
+            // allow angles the file has since excluded.
+            ApplyAngleLimits();
+        }
+
+        /// <summary>
+        /// Pushes the current travel limits onto the spin boxes. Called after construction and
+        /// again after settings are read, since the file can change them.
+        /// </summary>
+        private void ApplyAngleLimits() {
+            CamPan_UpDown.Minimum = (decimal)WasdCameraControl.YawMin;
+            CamPan_UpDown.Maximum = (decimal)WasdCameraControl.YawMax;
+            PitchSpinner.Minimum = (decimal)Math.Min(WasdCameraControl.PitchMin, -2.0);
+            PitchSpinner.Maximum = (decimal)Math.Max(WasdCameraControl.PitchMax, 2.0);
+            Program.LogLine($"Angle limits: yaw {WasdCameraControl.YawMinDegrees:F1}.."
+                            + $"{WasdCameraControl.YawMaxDegrees:F1} deg, pitch "
+                            + $"{WasdCameraControl.PitchMinDegrees:F1}.."
+                            + $"{WasdCameraControl.PitchMaxDegrees:F1} deg");
         }
 
         private static void FloatsToPreset(float[] preset, int i) {

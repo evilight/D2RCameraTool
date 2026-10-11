@@ -49,23 +49,39 @@ internal sealed class WasdCameraControl
     // box ranges.
     //
     // Yaw is CLAMPED rather than wrapped: wrapping made the value jump from +180 to -180,
-    // which reads as the view snapping round. Clamping does not reduce the reachable range --
-    // [-180, +180] spans a full circle, just without the discontinuity at the ends.
+    // which reads as the view snapping round.
+    //
+    // The limits were originally the full [-180, +180], which the camera cannot actually use.
+    // Two separate things narrow the useful range:
+    //
+    //   Below about -30 degrees the view degrades. A yaw sweep shows the scene going dark from
+    //   roughly -45 and staying dark to -180, with the ground reduced to a thin diagonal strip -
+    //   the camera is at or below the terrain, because Diablo has no camera collision. The camera
+    //   also turns at only half the rate of the yaw value, so what the value buys is half what it
+    //   looks like.
+    //
+    //   Above about +30 degrees of pitch the view is looking at the horizon and past the edge of
+    //   the level, and the ground is rendered edge-on. A pitch sweep shows the horizon appearing
+    //   around +10 and the screen mostly void by +31.
+    //
+    // So: yaw [-30, +90] and pitch [-89, +30], which is the region where the view changes evenly
+    // and stays inside the level.
     //
     // Pitch is the camera's elevation. Negative looks down at the ground, positive lifts the
-    // camera to look up. -89 is almost straight down; +89 puts the camera almost level with
-    // the player looking up, which the game was never authored for and may render oddly.
-    public const double YawMinDegrees = -180;
-    public const double YawMaxDegrees = 180;
-    public const double PitchMinDegrees = -89;
-    public const double PitchMaxDegrees = 89;
+    // camera to look up. -89 is almost straight down; +30 is already close to the horizon.
+    public static double YawMinDegrees = -30;
+    public static double YawMaxDegrees = 90;
+    public static double PitchMinDegrees = -89;
+    public static double PitchMaxDegrees = 30;
 
     private const double DegToRad = Math.PI / 180.0;
 
-    public const double YawMin = YawMinDegrees * DegToRad;
-    public const double YawMax = YawMaxDegrees * DegToRad;
-    public const double PitchMin = PitchMinDegrees * DegToRad;
-    public const double PitchMax = PitchMaxDegrees * DegToRad;
+    // Properties, not constants: the limits are settable from settings.ini so they can be tuned
+    // without a rebuild, and the spin box ranges follow them.
+    public static double YawMin => YawMinDegrees * DegToRad;
+    public static double YawMax => YawMaxDegrees * DegToRad;
+    public static double PitchMin => PitchMinDegrees * DegToRad;
+    public static double PitchMax => PitchMaxDegrees * DegToRad;
 
     public bool Enabled = true;
     public double SpeedRadPerSec = DefaultSpeed;
@@ -113,6 +129,35 @@ internal sealed class WasdCameraControl
     private int _rateTicks;
     private double _rateWindowStartMs;
     public double MeasuredHz { get; private set; }
+
+    /// <summary>
+    /// Lift the camera when yaw is negative.
+    ///
+    /// The camera does not orbit on a flat circle. Watching a yaw sweep, the view goes dark from
+    /// about -79 degrees onward and stays dark to -180, with the ground reduced to a thin diagonal
+    /// strip - the camera is at or below the terrain, and Diablo has no camera collision to stop
+    /// it. The same sweep is perfectly fine at +180. Since +180 and -180 would be the same camera
+    /// position on any circular orbit, flat or tilted, the azimuth cannot be equal to the yaw
+    /// value; the only reading that fits both the sinking and the two ends being maximally
+    /// different is that the camera turns at half the rate of the yaw value, so the height follows
+    /// sin(yaw / 2) - lowest at -180, highest at +180.
+    ///
+    /// Measured on the live game: at yaw = -180 the camera comes back above ground at height
+    /// 0.489118, against a base of 0.239118. That is 0.25 of correction at the arc's lowest point,
+    /// which is the gain below. Correction is applied only on the sinking side, so the positive
+    /// half is left exactly as the game has it.
+    /// </summary>
+    public bool AutoHeight;
+    public double AutoHeightGain = 0.25;
+
+    /// <summary>The height the user asked for, before compensation.</summary>
+    public double BaseHeight = DefaultHeight;
+
+    public const double DefaultHeight = 0.239118;
+
+    public double LastHeightCorrection { get; private set; }
+
+    private double _lastHeightLogged = double.NaN;
 
     private double _lastRateLogMs;
     private float _rateRefYaw;
@@ -245,6 +290,8 @@ internal sealed class WasdCameraControl
         RawW = Down(Keys.W);
         RawS = Down(Keys.S);
 
+        ApplyAutoHeight();
+
         double yawStep = 0, pitchStep = 0;
         if (Enabled && (!RequireGameFocus || _gameFocused))
         {
@@ -335,6 +382,41 @@ internal sealed class WasdCameraControl
         // Movement is running; the monitor keeps watching for anything we did not write.
         MonitorCamera();
         return wrote;
+    }
+
+    /// <summary>
+    /// Applies the arc compensation to the camera height.
+    ///
+    /// Runs on every tick rather than only when a key is held, because the yaw can also be changed
+    /// by the mouse drag, by a preset or by typing in the box, and the camera must not be left
+    /// under the ground after any of them.
+    /// </summary>
+    private void ApplyAutoHeight()
+    {
+        if (!AutoHeight) return;
+        if (!Program.WriteAccessAvailable) return;
+        if (Program.CamHeightValue.BaseAddress <= 0 || Program.CamPanValue.BaseAddress <= 0) return;
+
+        double yaw = Program.CamPanValue.Read();
+        if (double.IsNaN(yaw)) return;
+
+        double correction = AutoHeightGain * Math.Max(0.0, -Math.Sin(yaw / 2.0));
+        LastHeightCorrection = correction;
+
+        float target = (float)(BaseHeight + correction);
+        float current = Program.CamHeightValue.Read();
+        if (float.IsNaN(current) || Math.Abs(current - target) < 1e-5f) return;
+
+        Program.TryChangeValue(Program.CamHeightValue, target);
+
+        // Log only on a meaningful change; this runs a thousand times a second.
+        if (double.IsNaN(_lastHeightLogged) || Math.Abs(correction - _lastHeightLogged) > 0.01)
+        {
+            _lastHeightLogged = correction;
+            Program.LogLine($"Auto height: yaw {yaw:F4} ({yaw * 180 / Math.PI:F1} deg) -> "
+                            + $"height {BaseHeight + correction:F6} "
+                            + $"(base {BaseHeight:F6} + {correction:F6})");
+        }
     }
 
     /// <summary>

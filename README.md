@@ -47,7 +47,16 @@ they can be modified at all.
 > Addresses are per-run (heap layout changes on every launch) — the signature is the
 > stable thing, not the address.
 
-### A rule that had to be removed
+### Note on running under a restricted host
+
+If the tool reports `0 process(es)` and `win32 err 0`, the host is restricting process
+visibility to its own job tree rather than denying access. Observed while developing under
+a sandboxed agent harness: a native Python `CreateToolhelp32Snapshot` call saw 233 processes
+and could open the game, while the same call from this .NET binary returned 0 for every
+process outside the harness's own job. The tool now tries both the native Toolhelp32 walk and
+the managed `Process.GetProcessesByName` and uses whichever finds the process. Running the
+executable normally on a desktop is unaffected.
+
 
 An earlier revision treated "no churn in the candidate's neighbourhood" as proof that a
 signature hit was a stale copy, escalated to the structural scan, and scored frozen

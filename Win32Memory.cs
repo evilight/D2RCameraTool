@@ -52,24 +52,69 @@ internal sealed class Win32Memory : IDisposable
         string bare = processName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
             ? processName[..^4]
             : processName;
-        var procs = System.Diagnostics.Process.GetProcessesByName(bare);
-        Trace?.Invoke($"GetProcessesByName('{bare}') -> {procs.Length} process(es)");
-        try
+
+        // Enumerate with the raw Toolhelp32 API rather than System.Diagnostics.Process.
+        // Observed in a sandboxed host: Process.GetProcessesByName returned 0 processes for
+        // everything outside the host's own job object, while an identical native
+        // Toolhelp32 walk from Python saw the whole session -- the game could not be found
+        // at all. The native walk is also the more predictable API here.
+        var pids = EnumerateProcesses()
+            .Where(p => string.Equals(p.name, bare, StringComparison.OrdinalIgnoreCase))
+            .Select(p => p.pid)
+            .ToList();
+        Trace?.Invoke($"Toolhelp32: '{bare}' -> {pids.Count} process(es) [{string.Join(",", pids)}]");
+
+        foreach (var pid in pids)
         {
-            foreach (var p in procs)
+            if (Open(pid, writeAccess))
             {
-                if (Open(p.Id, writeAccess))
+                ProcessName = bare;
+                return true;
+            }
+        }
+
+        // Fall back to the managed API in case the native walk was itself restricted.
+        if (pids.Count == 0)
+        {
+            var procs = System.Diagnostics.Process.GetProcessesByName(bare);
+            Trace?.Invoke($"fallback GetProcessesByName('{bare}') -> {procs.Length}");
+            try
+            {
+                foreach (var p in procs)
                 {
-                    ProcessName = p.ProcessName;
-                    return true;
+                    if (Open(p.Id, writeAccess)) { ProcessName = p.ProcessName; return true; }
                 }
             }
-            return false;
+            finally
+            {
+                foreach (var p in procs) p.Dispose();
+            }
+        }
+        return false;
+    }
+
+    /// <summary>Full process list via CreateToolhelp32Snapshot.</summary>
+    public static List<(int pid, string name)> EnumerateProcesses()
+    {
+        var list = new List<(int, string)>();
+        IntPtr snap = Native.CreateToolhelp32Snapshot(Native.TH32CS_SNAPPROCESS, 0);
+        if (snap == IntPtr.Zero || snap == new IntPtr(-1)) return list;
+        try
+        {
+            var e = new Native.PROCESSENTRY32W { dwSize = (uint)Marshal.SizeOf<Native.PROCESSENTRY32W>() };
+            if (!Native.Process32FirstW(snap, ref e)) return list;
+            do
+            {
+                list.Add(((int)e.th32ProcessID, e.szExeFile ?? string.Empty));
+                e.dwSize = (uint)Marshal.SizeOf<Native.PROCESSENTRY32W>();
+            }
+            while (Native.Process32NextW(snap, ref e));
         }
         finally
         {
-            foreach (var p in procs) p.Dispose();
+            Native.CloseHandle(snap);
         }
+        return list;
     }
 
     public bool Open(int pid, bool writeAccess = true)
@@ -272,6 +317,35 @@ internal sealed class Win32Memory : IDisposable
 
     private static class Native
     {
+        internal const uint TH32CS_SNAPPROCESS = 0x00000002;
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        internal struct PROCESSENTRY32W
+        {
+            public uint dwSize;
+            public uint cntUsage;
+            public uint th32ProcessID;
+            public IntPtr th32DefaultHeapID;
+            public uint th32ModuleID;
+            public uint cntThreads;
+            public uint th32ParentProcessID;
+            public int pcPriClassBase;
+            public uint dwFlags;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+            public string szExeFile;
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        internal static extern IntPtr CreateToolhelp32Snapshot(uint dwFlags, uint th32ProcessID);
+
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool Process32FirstW(IntPtr hSnapshot, ref PROCESSENTRY32W lppe);
+
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool Process32NextW(IntPtr hSnapshot, ref PROCESSENTRY32W lppe);
+
         internal const uint TOKEN_ADJUST_PRIVILEGES = 0x0020;
         internal const uint TOKEN_QUERY = 0x0008;
         internal const uint SE_PRIVILEGE_ENABLED = 0x0002;

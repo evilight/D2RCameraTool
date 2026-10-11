@@ -106,6 +106,10 @@ internal sealed class WasdCameraControl
     private double _rateWindowStartMs;
     public double MeasuredHz { get; private set; }
 
+    private double _lastRateLogMs;
+    private float _rateRefYaw;
+    private bool _rateRefValid;
+
     // Continuous camera monitor. Samples the value we manage and reports any change we did not
     // make, with the context. Unbounded on purpose - see MonitorCamera.
     private const double MonitorEveryMs = 250;
@@ -292,6 +296,32 @@ internal sealed class WasdCameraControl
                 DisplayPitchDirty = true;
                 wrote = true;
             }
+        }
+
+        // Throttled rate trace. SpeedRadPerSec is what we intend to write; this is what actually
+        // reaches memory. Measuring the view from captured frames suggested the camera turns about
+        // an order of magnitude slower than configured, and the frame measurement cannot be
+        // trusted for the absolute angle - an isometric camera's rotation is a projective
+        // transform on screen, so an affine fit underestimates it badly. This reads the value.
+        double logNow = _clock.Elapsed.TotalMilliseconds;
+        if (logNow - _lastRateLogMs > 500)
+        {
+            double dtSec = (logNow - _lastRateLogMs) / 1000.0;
+            float yawNow = Program.CamPanValue.Read();
+            if (_rateRefValid && dtSec > 0.05 && !float.IsNaN(yawNow))
+            {
+                double dRad = yawNow - _rateRefYaw;
+                Program.LogLine(
+                    $"WASD rate: yaw {_rateRefYaw:F6} -> {yawNow:F6} in {dtSec:F3}s = "
+                    + $"{dRad / dtSec:F4} rad/s ({dRad * 180 / Math.PI / dtSec:F1} deg/s); "
+                    + $"configured {SpeedRadPerSec:F3} rad/s = "
+                    + $"{SpeedRadPerSec * 180 / Math.PI:F1} deg/s; "
+                    + $"intervalMs={UpdateIntervalMs} measuredHz={MeasuredHz:F0} "
+                    + $"yawRewrites={YawRewrites}");
+            }
+            _rateRefYaw = yawNow;
+            _rateRefValid = !float.IsNaN(yawNow);
+            _lastRateLogMs = logNow;
         }
 
         // Movement is running; the monitor keeps watching for anything we did not write.

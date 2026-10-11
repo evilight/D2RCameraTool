@@ -771,6 +771,11 @@ namespace D2RCameraTool
         public static readonly CameraSampler Sampler = new();
 
         /// <summary>
+        /// Follow camera driven by the character's own movement. See FollowCamera.
+        /// </summary>
+        public static readonly FollowCamera Follow = new();
+
+        /// <summary>
         /// When true, every key the global hook sees is logged with its virtual-key code.
         ///
         /// Exists because a laptop F-key is often a multi-function key: pressing F9 alone can
@@ -785,6 +790,10 @@ namespace D2RCameraTool
 
             // The base address moved, so any mirror list from a previous locate is stale.
             CameraMirrors.Clear();
+
+            // The tracked world position belongs to the old base; start over rather than treating
+            // the relocation as a huge step.
+            Follow.Reset();
 
             PitchValue.UpdateBase(valuesBase);
             CamHeightValue.UpdateBase(valuesBase + 0x4);

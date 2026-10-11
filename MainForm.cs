@@ -48,6 +48,10 @@ namespace D2RCameraTool
         private CheckBox WasdFocus_CheckBox = null!;
         private NumericUpDown WasdRate_UpDown = null!;
         private Label Wasd_Status_Label = null!;
+        private CheckBox Follow_CheckBox = null!;
+        private CheckBox FollowInvert_CheckBox = null!;
+        private NumericUpDown FollowOffset_UpDown = null!;
+        private Label Follow_Status_Label = null!;
         private GroupBox SessionGroup = null!;
         private Button ResetAll_Button = null!;
         private Button OverShoulder_Button = null!;
@@ -93,7 +97,7 @@ namespace D2RCameraTool
             CamPan_UpDown.Minimum = (decimal)WasdCameraControl.YawMin;
             CamPan_UpDown.Maximum = (decimal)WasdCameraControl.YawMax;
 
-            const int groupH = 98;
+            const int groupH = 124;
             const int extra = groupH + 8;
 
             WasdGroup = new GroupBox {
@@ -151,10 +155,36 @@ namespace D2RCameraTool
                 Size = new Size(Main_Panel.Width - 30, 18),
             };
 
+            // ---- follow camera, driven by the character's own movement -------------------
+            Follow_CheckBox = new CheckBox {
+                Text = "Follow movement", AutoSize = true,
+                Location = new Point(10, 98),
+            };
+            FollowInvert_CheckBox = new CheckBox {
+                Text = "Invert", AutoSize = true,
+                Location = new Point(150, 98),
+            };
+            var followOffsetLabel = new Label {
+                Text = "Yaw offset (rad)", AutoSize = true,
+                Location = new Point(230, 100),
+            };
+            FollowOffset_UpDown = new NumericUpDown {
+                Location = new Point(348, 97), Width = 70,
+                DecimalPlaces = 3, Increment = 0.05m,
+                Minimum = -3.15m, Maximum = 3.15m,
+            };
+            Follow_Status_Label = new Label {
+                AutoSize = false,
+                Location = new Point(430, 100),
+                Size = new Size(Main_Panel.Width - 440, 18),
+            };
+
             WasdGroup.Controls.AddRange(new Control[] {
                 Wasd_CheckBox, speedLabel, WasdSpeed_UpDown, WasdBlock_CheckBox,
                 WasdInvertYaw_CheckBox, WasdInvertPitch_CheckBox, WasdFocus_CheckBox,
                 rateLabel, WasdRate_UpDown, Wasd_Status_Label,
+                Follow_CheckBox, FollowInvert_CheckBox, followOffsetLabel, FollowOffset_UpDown,
+                Follow_Status_Label,
             });
 
             ClientSize = new Size(ClientSize.Width, ClientSize.Height + extra);
@@ -167,6 +197,9 @@ namespace D2RCameraTool
             WasdInvertPitch_CheckBox.CheckedChanged += (_, _) => Wasd.InvertPitch = WasdInvertPitch_CheckBox.Checked;
             WasdBlock_CheckBox.CheckedChanged += (_, _) => Wasd.BlockKeys = WasdBlock_CheckBox.Checked;
             WasdFocus_CheckBox.CheckedChanged += (_, _) => { Wasd.RequireGameFocus = WasdFocus_CheckBox.Checked; UpdateWasdStatus(); };
+            Follow_CheckBox.CheckedChanged += (_, _) => Program.Follow.Enabled = Follow_CheckBox.Checked;
+            FollowInvert_CheckBox.CheckedChanged += (_, _) => Program.Follow.Invert = FollowInvert_CheckBox.Checked;
+            FollowOffset_UpDown.ValueChanged += (_, _) => Program.Follow.Offset = (double)FollowOffset_UpDown.Value;
             WasdRate_UpDown.ValueChanged += (_, _) => {
                 Wasd.UpdateIntervalMs = (int)WasdRate_UpDown.Value;
                 wasdWriteTimer?.Change(0, Wasd.UpdateIntervalMs);
@@ -314,7 +347,6 @@ namespace D2RCameraTool
                 ResetAll_Button, OverShoulder_Button, CaptureSample_Button, KeyEcho_CheckBox,
                 WorldScan_Button,
             });
-
             ClientSize = new Size(ClientSize.Width, ClientSize.Height + extra);
             statusStrip1.Top += extra;
             Controls.Add(SessionGroup);
@@ -394,6 +426,11 @@ namespace D2RCameraTool
             WasdFocus_CheckBox.Checked = Wasd.RequireGameFocus;
             WasdRate_UpDown.Value = (decimal)Math.Clamp(Wasd.UpdateIntervalMs,
                 (int)WasdRate_UpDown.Minimum, (int)WasdRate_UpDown.Maximum);
+
+            Follow_CheckBox.Checked = Program.Follow.Enabled;
+            FollowInvert_CheckBox.Checked = Program.Follow.Invert;
+            FollowOffset_UpDown.Value = (decimal)Math.Clamp(Program.Follow.Offset,
+                (double)FollowOffset_UpDown.Minimum, (double)FollowOffset_UpDown.Maximum);
         }
 
         private void UpdateWasdStatus() {
@@ -510,6 +547,7 @@ namespace D2RCameraTool
 
                 int pid = Program.ProcessFound && Program.MemLib.IsOpen ? Program.MemLib.ProcessId : 0;
                 Wasd.Tick(pid);
+                Program.Follow.Tick();
             } catch {
                 // An unhandled exception on a timer thread would take the whole app down.
             }
@@ -534,6 +572,12 @@ namespace D2RCameraTool
                 lastFocusState = Wasd.GameFocused;
                 UpdateWasdStatus();
             }
+
+            Follow_Status_Label.Text = Program.Follow.Enabled
+                ? (Program.Follow.Active
+                   ? $"following, dir {Program.Follow.Direction:F3}, yaw {Program.Follow.LastYawWritten:F3}"
+                   : "waiting for the character to move")
+                : "";
         }
 
         private void TopMost_CheckedChanged(object sender, EventArgs e) {
@@ -976,6 +1020,10 @@ namespace D2RCameraTool
             data["sample_window"] = Program.Sampler.WindowRadius.ToString(CultureInfo.InvariantCulture);
             data["sample_raw_dump"] = Program.Sampler.RawDump ? "1" : "0";
 
+            data["follow_enabled"] = Program.Follow.Enabled ? "1" : "0";
+            data["follow_invert"] = Program.Follow.Invert ? "1" : "0";
+            data["follow_offset"] = Program.Follow.Offset.ToString(CultureInfo.InvariantCulture);
+
             for (int i=0; i<PresetsArray.Length; i++) {
                 float[] preset = { PresetsArray[i].Sensitivity, PresetsArray[i].Pitch, PresetsArray[i].Yaw, PresetsArray[i].Roll, PresetsArray[i].Height, PresetsArray[i].Zoom };
                 data["preset" + (i+1).ToString()] = JoinFloats(preset);
@@ -1050,6 +1098,15 @@ namespace D2RCameraTool
                         break;
                     case "sample_raw_dump":
                         Program.Sampler.RawDump = pair.Value == "1";
+                        break;
+                    case "follow_enabled":
+                        Program.Follow.Enabled = pair.Value == "1";
+                        break;
+                    case "follow_invert":
+                        Program.Follow.Invert = pair.Value == "1";
+                        break;
+                    case "follow_offset":
+                        if (TryParseInvariant(pair.Value, out double fo)) Program.Follow.Offset = fo;
                         break;
                     case "preset1":
                         preset = StringToFloats(pair.Value);

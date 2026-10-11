@@ -50,6 +50,7 @@ namespace D2RCameraTool
         private Label Wasd_Status_Label = null!;
         private GroupBox SessionGroup = null!;
         private Button ResetAll_Button = null!;
+        private Button OverShoulder_Button = null!;
         private CheckBox ResetZoom_CheckBox = null!;
         private System.Windows.Forms.Timer? wasdUiTimer;
         private System.Threading.Timer? wasdWriteTimer;
@@ -174,57 +175,86 @@ namespace D2RCameraTool
         }
 
         /// <summary>
-        /// One-click "leave the game as the tool found it, then quit": restores every camera
-        /// value and closes.
+        /// One-click "put every camera value back": restores pitch, yaw, roll and height, plus
+        /// zoom unless it is unticked.
         ///
         /// This exists because the values are what the locator keys on. Leaving pitch or yaw
         /// rotated means the legacy signature no longer matches on the next launch and the tool
-        /// has to fall back to the slower structural scan - or fails on a hostile layout. The
-        /// reset writes the pristine 1.6-era byte patterns, which is exactly what restores the
+        /// has to fall back to the slower structural scan - or fails on a hostile layout. It
+        /// writes the pristine 1.6-era byte patterns, which is exactly what restores the
         /// signature, rather than whatever values happened to be present when we attached.
+        ///
+        /// It deliberately does NOT exit: closing stays a separate, deliberate action.
         /// </summary>
-        private void ResetAllAndExit_Click(object sender, EventArgs e) {
+        private void ResetAllValues_Click(object sender, EventArgs e) {
             var restored = new List<string>();
 
             try {
                 if (!Program.ValuesFound) {
                     Program.LogLine("Reset all requested before the camera was located - nothing to restore");
-                } else {
-                    Program.PitchValue.Reset();
-                    Program.CamPanValue.Reset();
-                    Program.RollValue.Reset();
-                    Program.CamHeightValue.Reset();
-                    restored.AddRange(new[] { "pitch", "yaw", "roll", "height" });
-
-                    if (ResetZoom_CheckBox.Checked) {
-                        Program.ZoomValue.Reset();
-                        restored.Add("zoom");
-                    }
-
-                    // Read back so the log carries proof of what the game was left holding,
-                    // which is the thing that matters if the next launch cannot find the camera.
-                    Program.LogLine(
-                        $"Reset all ({string.Join(", ", restored)}) then exit. "
-                        + $"Read back: pitch={Program.PitchValue.Read():F6} "
-                        + $"yaw={Program.CamPanValue.Read():F6} "
-                        + $"roll={Program.RollValue.Read():F6} "
-                        + $"height={Program.CamHeightValue.Read():F6} "
-                        + $"zoom={Program.ZoomValue.Read():F6}");
+                    return;
                 }
+
+                Program.PitchValue.Reset();
+                Program.CamPanValue.Reset();
+                Program.RollValue.Reset();
+                Program.CamHeightValue.Reset();
+                restored.AddRange(new[] { "pitch", "yaw", "roll", "height" });
+
+                if (ResetZoom_CheckBox.Checked) {
+                    Program.ZoomValue.Reset();
+                    restored.Add("zoom");
+                }
+
+                // Read back so the log carries proof of what the game was left holding, which is
+                // the thing that matters if the next launch cannot find the camera.
+                Program.LogLine(
+                    $"Reset all ({string.Join(", ", restored)}). "
+                    + $"Read back: pitch={Program.PitchValue.Read():F6} "
+                    + $"yaw={Program.CamPanValue.Read():F6} "
+                    + $"roll={Program.RollValue.Read():F6} "
+                    + $"height={Program.CamHeightValue.Read():F6} "
+                    + $"zoom={Program.ZoomValue.Read():F6}");
             } catch (Exception ex) {
                 Program.LogLine("Reset all failed: " + ex.Message);
             }
-
-            Close();
         }
 
         /// <summary>
-        /// Compact strip under the WASD panel holding the reset-and-exit button. The designer
-        /// panel has no spare room (its lowest control ends 11 px above the bottom), so the
-        /// form is grown again rather than rearranging existing controls.
+        /// Applies the over-the-shoulder pose. Goes through the spin boxes rather than writing
+        /// memory directly: their ValueChanged handlers are the existing, tested write path, and
+        /// the displayed values stay in step with the game.
+        /// </summary>
+        private void OverShoulder_Click(object sender, EventArgs e) {
+            if (!Program.ValuesFound) {
+                Program.LogLine("Over-shoulder pose requested before the camera was located");
+                return;
+            }
+
+            try {
+                PitchSpinner.Value = ClampToRange(PitchSpinner, (decimal)CameraPresets.OverShoulderPitch);
+                Roll_UpDown.Value = ClampToRange(Roll_UpDown, (decimal)CameraPresets.OverShoulderRoll);
+                Zoom_UpDown.Value = ClampToRange(Zoom_UpDown, (decimal)CameraPresets.OverShoulderZoom);
+
+                Program.LogLine(
+                    $"Over-shoulder pose applied: pitch={PitchSpinner.Value} "
+                    + $"roll={Roll_UpDown.Value} zoom={Zoom_UpDown.Value} "
+                    + $"(yaw={CamPan_UpDown.Value} and height={CamHeight_UpDown.Value} left alone). "
+                    + "Read back from game: "
+                    + $"pitch={Program.PitchValue.Read():F6} roll={Program.RollValue.Read():F6} "
+                    + $"zoom={Program.ZoomValue.Read():F6}");
+            } catch (Exception ex) {
+                Program.LogLine("Over-shoulder pose failed: " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Compact strip under the WASD panel holding the session buttons. The designer panel
+        /// has no spare room (its lowest control ends 11 px above the bottom), so the form is
+        /// grown rather than rearranging existing controls.
         /// </summary>
         private void BuildSessionPanel() {
-            const int groupH = 52;
+            const int groupH = 46;
             const int extra = groupH + 6;
 
             SessionGroup = new GroupBox {
@@ -234,30 +264,30 @@ namespace D2RCameraTool
             };
 
             ResetAll_Button = new Button {
-                Text = "Reset all values and exit",
-                Location = new Point(10, 16),
-                Size = new Size(190, 26),
+                Text = "Reset all values",
+                Location = new Point(10, 14),
+                Size = new Size(120, 26),
             };
             ResetZoom_CheckBox = new CheckBox {
                 Text = "also reset zoom", AutoSize = true,
-                Location = new Point(216, 21), Checked = true,
+                Location = new Point(142, 19), Checked = true,
             };
-
-            var hint = new Label {
-                Text = "Restores the original values so the camera can be found again next launch.",
-                AutoSize = true,
-                Location = new Point(360, 22),
+            OverShoulder_Button = new Button {
+                Text = "Over-shoulder pose",
+                Location = new Point(280, 14),
+                Size = new Size(150, 26),
             };
 
             SessionGroup.Controls.AddRange(new Control[] {
-                ResetAll_Button, ResetZoom_CheckBox, hint,
+                ResetAll_Button, ResetZoom_CheckBox, OverShoulder_Button,
             });
 
             ClientSize = new Size(ClientSize.Width, ClientSize.Height + extra);
             statusStrip1.Top += extra;
             Controls.Add(SessionGroup);
 
-            ResetAll_Button.Click += ResetAllAndExit_Click;
+            ResetAll_Button.Click += ResetAllValues_Click;
+            OverShoulder_Button.Click += OverShoulder_Click;
         }
 
         /// <summary>Pushes the control's settings into the widgets (used after loading the ini).</summary>

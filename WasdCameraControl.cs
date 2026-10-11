@@ -106,6 +106,13 @@ internal sealed class WasdCameraControl
     private double _rateWindowStartMs;
     public double MeasuredHz { get; private set; }
 
+    // Post-release revert watch. How long to keep checking after the last write.
+    private const double RevertWatchMs = 4000;
+    private bool _watchArmed;
+    private double _watchStartMs;
+    private float _watchYaw;
+    private bool _watchReported;
+
     public bool GameFocused => _gameFocused;
     public bool AnyKeyHeld { get; private set; }
 
@@ -226,7 +233,11 @@ internal sealed class WasdCameraControl
         }
 
         AnyKeyHeld = yawStep != 0 || pitchStep != 0;
-        if (!AnyKeyHeld) return false;
+        if (!AnyKeyHeld)
+        {
+            WatchForRevert();
+            return false;
+        }
 
         // Without write access the attempt would fail every tick; the status line already says
         // the attach is read-only, so do not spam it from this thread.
@@ -238,11 +249,12 @@ internal sealed class WasdCameraControl
         {
             float cur = Program.CamPanValue.Read();
             if (!float.IsNaN(_lastYawWritten) && Math.Abs(cur - _lastYawWritten) > 1e-6f)
-                YawRewrites++;   // the engine put its own value back
+                YawRewrites++;   // something put its own value back
 
             float next = (float)Math.Clamp(cur + yawStep, YawMin, YawMax);
             if (Program.TryChangeValue(Program.CamPanValue, next))
             {
+                WriteMirrors(0x8, next);
                 _lastYawWritten = next;
                 DisplayYaw = next;
                 DisplayYawDirty = true;
@@ -259,6 +271,7 @@ internal sealed class WasdCameraControl
             float next = (float)Math.Clamp(cur + pitchStep, PitchMin, PitchMax);
             if (Program.TryChangeValue(Program.PitchValue, next))
             {
+                WriteMirrors(0x0, next);
                 _lastPitchWritten = next;
                 DisplayPitch = next;
                 DisplayPitchDirty = true;
@@ -266,6 +279,57 @@ internal sealed class WasdCameraControl
             }
         }
 
+        // Movement is running, so the post-release watch starts fresh from the next release.
+        _watchArmed = false;
         return wrote;
+    }
+
+    /// <summary>
+    /// Mirrors a value into every byte-exact camera copy. The camera lives at more than one
+    /// address (originally observed 0x170 apart); leaving a stale copy behind gives the engine
+    /// something to restore from.
+    /// </summary>
+    private static void WriteMirrors(long fieldOffset, float value)
+    {
+        long best = Program.PitchValue.BaseAddress;
+        foreach (long m in Program.CameraMirrors)
+        {
+            if (m == best) continue;
+            Program.MemLib.WriteFloat((ulong)(m + fieldOffset), value);
+        }
+    }
+
+    /// <summary>
+    /// Watches for the yaw value being restored after the keys are released.
+    ///
+    /// This is the case the in-hold counter could not see: it only ran while a key was held,
+    /// which is exactly when the engine is NOT restoring. The reported symptom - the view
+    /// follows while held and returns to its old position on release - is what this detects.
+    /// </summary>
+    private void WatchForRevert()
+    {
+        if (float.IsNaN(_lastYawWritten) || Program.CamPanValue.BaseAddress <= 0) return;
+
+        double nowMs = _clock.Elapsed.TotalMilliseconds;
+
+        if (!_watchArmed)
+        {
+            _watchArmed = true;
+            _watchStartMs = nowMs;
+            _watchYaw = _lastYawWritten;
+            _watchReported = false;
+            return;
+        }
+
+        if (_watchReported || nowMs - _watchStartMs > RevertWatchMs) return;
+
+        float cur = Program.CamPanValue.Read();
+        if (Math.Abs(cur - _watchYaw) <= 1e-6f) return;
+
+        _watchReported = true;
+        Program.LogLine(
+            $"WASD yaw REVERTED {nowMs - _watchStartMs:F0} ms after the last write: "
+            + $"we left {_watchYaw:F6}, memory now {cur:F6}. "
+            + "The engine rebuilt the camera, so the value we write is restored rather than kept.");
     }
 }

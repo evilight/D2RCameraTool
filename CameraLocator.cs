@@ -76,7 +76,14 @@ internal static class CameraLocator
 
     private const int BulkProbeLimit = 100_000;
     private const int RefineCount = 256;
-    private const int LivenessProbeLimit = 512;
+
+    private static string TypeName(uint type) => type switch
+    {
+        0x20000 => "private",
+        0x40000 => "mapped",
+        0x1000000 => "image",
+        _ => $"0x{type:X}",
+    };
 
     private static byte[] Concat(params byte[][] arrays)
     {
@@ -101,7 +108,17 @@ internal static class CameraLocator
 
         var regions = mem.EnumerateRegions();
         long total = regions.Sum(r => (long)r.Size);
-        log($"scannable regions: {regions.Count}, {total / 1e6:F1} MB");
+        var byType = regions.GroupBy(r => r.Type)
+                            .Select(g => $"{TypeName(g.Key)} {g.Sum(x => (long)x.Size) / 1e6:F0}MB");
+        log($"scannable regions: {regions.Count}, {total / 1e6:F1} MB  [{string.Join(", ", byType)}]");
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        long lastLap = 0;
+        void Lap(string label)
+        {
+            long now = sw.ElapsedMilliseconds;
+            log($"  [{label}: {now - lastLap} ms, total {now} ms]");
+            lastLap = now;
+        }
 
         // ---------------------------------------------------------- Stage A
         var cands = new List<CameraCandidate>();
@@ -112,17 +129,17 @@ internal static class CameraLocator
             ct.ThrowIfCancellationRequested();
             cands = ScanLegacy(mem, regions);
             log($"  stage A candidates: {cands.Count}");
+            Lap("stage A scan");
 
             if (cands.Count > 0)
             {
-                // Liveness is reported but NOT used to reject. Live measurement on D2R 3.0.91636
-                // showed the signature still matches the real camera with the 1.6 values, while
-                // the candidate neighbourhood was completely static -- the player was standing in
-                // the stash. Treating "no churn" as "stale copy" demoted the correct answer below
-                // thousands of structural decoys and returned a wrong address. A static camera is
-                // normal; only a MISSING signature justifies the expensive scan.
-                int live = CountLive(mem, cands, ct);
-                log($"  liveness {live}/{cands.Count} (informational; a static camera is normal)");
+                // Liveness is reported (from the stage C sample) but NOT used to reject.
+                // Live measurement on D2R 3.0.91636 showed the signature still matches the real
+                // camera with the 1.6 values, while the candidate neighbourhood was completely
+                // static -- the player was standing in the stash. Treating "no churn" as "stale
+                // copy" demoted the correct answer below thousands of structural decoys and
+                // returned a wrong address. A static camera is normal; only a MISSING signature
+                // justifies the expensive scan.
                 method = "legacy signature";
             }
             else
@@ -149,6 +166,7 @@ internal static class CameraLocator
                 b = StructuralScan(mem, regions, null, log, ct);
             }
             log($"  stage B candidates: {b.Count}");
+            Lap("stage B scan");
 
             var seen = new HashSet<ulong>(cands.Select(c => c.Base));
             int added = 0;
@@ -170,27 +188,57 @@ internal static class CameraLocator
         }
 
         // ---------------------------------------------------------- Stage C
-        log("stage C: temporal stability filter (angles are constant while moving) ...");
-        ct.ThrowIfCancellationRequested();
-        var snapshots = new Dictionary<ulong, byte[]>();
-        foreach (var c in cands)
+        // Signature hits that already match all four legacy values byte for byte ARE the
+        // camera. The stability filter exists to weed out flickering structural candidates,
+        // so on this path there is nothing to weed out and the fixed 2 s wait is pure
+        // latency. Angles are constant for a stale copy and for the live camera alike, so
+        // the filter would not have separated them anyway.
+        bool allByteExact = cands.Count > 0 && method == "legacy signature"
+                            && cands.All(c => CountLegacyMatches(mem, c.Base) >= 4);
+
+        if (allByteExact)
         {
-            var b = mem.ReadBytes(c.Base - 4, 16);
-            if (b is { Length: 16 }) snapshots[c.Base] = b;
+            log("stage C: skipped - every candidate is a byte-exact signature match");
         }
-        log($"  sampling {snapshots.Count} blocks, hold still ~2s ...");
-        Thread.Sleep(2000);
-        var stable = new List<CameraCandidate>();
-        foreach (var c in cands)
+        else
         {
+            // One sample serves both questions: is the 16-byte quad unchanged (stability), and
+            // is the surrounding window changing at all (liveness).
+            log("stage C: temporal stability + liveness (one sample serves both) ...");
             ct.ThrowIfCancellationRequested();
-            if (!snapshots.TryGetValue(c.Base, out var before)) continue;
-            var after = mem.ReadBytes(c.Base - 4, 16);
-            if (after is { Length: 16 } && after.AsSpan().SequenceEqual(before))
-                stable.Add(c);
+            const int W = 0x80;
+            const int QuadOff = W - 4;   // roll begins here inside the window
+            var snapshots = new Dictionary<ulong, byte[]>();
+            foreach (var c in cands)
+            {
+                var b = mem.ReadBytes(c.Base - (ulong)W, W * 2);
+                if (b is { Length: W * 2 }) snapshots[c.Base] = b;
+            }
+            log($"  sampling {snapshots.Count} windows, hold still ~2s ...");
+            Thread.Sleep(2000);
+            var stable = new List<CameraCandidate>();
+            int liveCount = 0;
+            foreach (var c in cands)
+            {
+                ct.ThrowIfCancellationRequested();
+                if (!snapshots.TryGetValue(c.Base, out var before)) continue;
+                var after = mem.ReadBytes(c.Base - (ulong)W, W * 2);
+                if (after is null || after.Length != before.Length) continue;
+
+                bool quadSame = after.AsSpan(QuadOff, 16).SequenceEqual(before.AsSpan(QuadOff, 16));
+                bool windowChanged = false;
+                for (int i = 0; i < before.Length; i++)
+                {
+                    if (before[i] != after[i]) { windowChanged = true; break; }
+                }
+                if (windowChanged) liveCount++;
+                if (quadSame) stable.Add(c);
+            }
+            log($"  stable {stable.Count}/{cands.Count}, live {liveCount} "
+                + "(a static camera is normal - the player may be in a menu)");
+            if (stable.Count > 0) cands = stable;
+            Lap("stage C sample");
         }
-        log($"  stable: {stable.Count} (dropped {cands.Count - stable.Count})");
-        if (stable.Count > 0) cands = stable;
 
         // ---------------------------------------------------------- Stage D
         log("stage D: ranking (exact legacy match dominates, else proximity + liveness) ...");
@@ -206,6 +254,7 @@ internal static class CameraLocator
             : cands;
         log($"  probing churn on {probe.Count} candidates ...");
         ChurnPass(mem, probe, BulkChurnWindow, (c, v) => c.Churn = v, ct);
+        Lap("stage D churn");
 
         foreach (var c in cands)
         {
@@ -263,7 +312,7 @@ internal static class CameraLocator
     private static List<CameraCandidate> ScanLegacy(Win32Memory mem, List<MemoryRegion> regions)
     {
         var found = new List<CameraCandidate>();
-        foreach (var hit in mem.FindPattern(LegacyAnglePattern, null, regions))
+        foreach (var hit in mem.FindAll(LegacyAnglePattern, null, regions))
         {
             var c = ReadQuad(mem, hit);
             if (c is null) continue;
@@ -271,36 +320,6 @@ internal static class CameraLocator
             found.Add(c);
         }
         return found;
-    }
-
-    /// <summary>
-    /// How many candidates have a changing neighbourhood. Reported for diagnostics only:
-    /// a static camera is normal (the player may be standing in a menu), so this must not
-    /// be used to reject candidates.
-    /// </summary>
-    private static int CountLive(Win32Memory mem, List<CameraCandidate> cands, CancellationToken ct)
-    {
-        var before = new List<(ulong start, byte[] bytes)>();
-        foreach (var c in cands.Take(LivenessProbeLimit))
-        {
-            ulong start = c.Base >= (ulong)ChurnWindow ? c.Base - (ulong)ChurnWindow : 0;
-            var b = mem.ReadBytes(start, ChurnWindow * 2);
-            if (b is not null) before.Add((start, b));
-        }
-        if (before.Count == 0) return 0;
-
-        Thread.Sleep(500);
-        ct.ThrowIfCancellationRequested();
-
-        int live = 0;
-        foreach (var (start, a) in before)
-        {
-            var b = mem.ReadBytes(start, ChurnWindow * 2);
-            if (b is null || b.Length != a.Length) continue;
-            for (int i = 0; i < a.Length; i++)
-                if (a[i] != b[i]) { live++; break; }
-        }
-        return live;
     }
 
     // ------------------------------------------------------------------ helpers

@@ -416,9 +416,8 @@ namespace D2RCameraTool
             {
                 hit = await Task.Run(() =>
                 {
-                    foreach (var h in MemLib.FindPattern(ZoomPattern, ZoomMask))
-                        return h;
-                    return 0UL;
+                    var all = MemLib.FindAll(ZoomPattern, ZoomMask);
+                    return all.Count > 0 ? all[0] : 0UL;
                 });
             }
             catch (Exception ex)

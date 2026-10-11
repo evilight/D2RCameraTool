@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 
 namespace D2RCameraTool;
@@ -310,80 +311,122 @@ internal sealed class Win32Memory : IDisposable
     // ---------------------------------------------------------------- scanning
 
     /// <summary>
-    /// Linear byte-pattern scan. <paramref name="mask"/> entries of 0x00 are wildcards;
-    /// a null mask means every byte must match.
+    /// Finds every occurrence of <paramref name="pattern"/> (mask bytes of 0x00 are
+    /// wildcards) across the given regions.
+    ///
+    /// Two things make this fast enough for a multi-gigabyte process:
+    ///
+    ///  * the search is anchored on the pattern's LONGEST LITERAL RUN and driven by the
+    ///    vectorised span search, rather than stepping one byte at a time;
+    ///  * regions are scanned in parallel.
+    ///
+    /// The original hand-written byte loop needed about 78 s to walk 8.75 GB of live game
+    /// memory and return two hits.
     /// </summary>
-    public IEnumerable<ulong> FindPattern(byte[] pattern, byte[]? mask = null,
-                                          List<MemoryRegion>? regions = null,
-                                          Action<int>? onRegion = null)
+    public List<ulong> FindAll(byte[] pattern, byte[]? mask = null,
+                               List<MemoryRegion>? regions = null,
+                               CancellationToken ct = default)
     {
-        if (!IsOpen || pattern.Length == 0) yield break;
+        var hits = new List<ulong>();
+        if (!IsOpen || pattern.Length == 0) return hits;
         regions ??= EnumerateRegions();
-        int plen = pattern.Length;
-        byte first = pattern[0];
-        bool firstIsWild = mask != null && mask[0] == 0;
+        if (regions.Count == 0) return hits;
 
-        int regionIndex = 0;
-        foreach (var region in regions)
-        {
-            onRegion?.Invoke(regionIndex++);
-            ulong off = 0;
-            while (off < region.Size)
+        var (anchor, runStart) = LongestLiteralRun(pattern, mask);
+
+        // Leave a couple of cores for the game and the UI thread.
+        int dop = Math.Clamp(Environment.ProcessorCount / 2, 1, 8);
+        object gate = new object();
+
+        Parallel.ForEach(
+            Partitioner.Create(0, regions.Count),
+            new ParallelOptions { MaxDegreeOfParallelism = dop, CancellationToken = ct },
+            range =>
             {
-                int n = (int)Math.Min((ulong)ChunkSize, region.Size - off);
-                var chunk = ReadBytes(region.Base + off, n);
-                if (chunk is null) { off += (ulong)n; continue; }
+                var local = new List<ulong>();
+                for (int ri = range.Item1; ri < range.Item2; ri++)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    var region = regions[ri];
+                    ulong off = 0;
+                    while (off < region.Size)
+                    {
+                        int n = (int)Math.Min((ulong)ChunkSize, region.Size - off);
+                        var chunk = ReadBytes(region.Base + off, n);
+                        if (chunk is not null)
+                            FindInChunk(chunk, pattern, mask, anchor, runStart,
+                                        region.Base + off, local);
+                        off += (ulong)n;
+                    }
+                }
+                if (local.Count > 0) lock (gate) hits.AddRange(local);
+            });
 
-                // The search itself lives in a non-iterator helper: a Span cannot be held
-                // across a yield boundary (CS4007).
-                var matches = new List<int>(2);
-                FindInChunk(chunk, pattern, mask, matches);
-                foreach (int m in matches) yield return region.Base + off + (ulong)m;
-
-                off += (ulong)n;
-            }
-        }
+        return hits;
     }
 
     /// <summary>
-    /// Collects match offsets for one chunk. Uses the vectorised
-    /// <see cref="MemoryExtensions.IndexOf(ReadOnlySpan{byte}, byte)"/> to skip to candidate
-    /// positions; the previous hand-written byte loop needed ~78 s to walk 8.75 GB of live
-    /// game memory and return two hits.
+    /// Returns the longest run of non-wildcard bytes and its offset in the pattern. For a
+    /// mask-free pattern this is the whole pattern, which lets the vectorised substring
+    /// search do all the work.
     /// </summary>
-    private static void FindInChunk(byte[] chunk, byte[] pattern, byte[]? mask, List<int> matches)
+    private static (byte[] anchor, int runStart) LongestLiteralRun(byte[] pattern, byte[]? mask)
+    {
+        int bestStart = 0, bestLen = 0, curStart = 0, curLen = 0;
+        for (int i = 0; i < pattern.Length; i++)
+        {
+            bool literal = mask is null || mask[i] != 0;
+            if (literal)
+            {
+                if (curLen == 0) curStart = i;
+                curLen++;
+                if (curLen > bestLen) { bestLen = curLen; bestStart = curStart; }
+            }
+            else
+            {
+                curLen = 0;
+            }
+        }
+
+        if (bestLen == 0) { bestStart = 0; bestLen = 1; }   // all wildcards: degenerate
+
+        var anchor = new byte[bestLen];
+        Array.Copy(pattern, bestStart, anchor, 0, bestLen);
+        return (anchor, bestStart);
+    }
+
+    /// <summary>Collects matches for one chunk into <paramref name="hits"/>.</summary>
+    private static void FindInChunk(byte[] chunk, byte[] pattern, byte[]? mask,
+                                    byte[] anchor, int runStart, ulong chunkBase,
+                                    List<ulong> hits)
     {
         int plen = pattern.Length;
         if (chunk.Length < plen) return;
 
         ReadOnlySpan<byte> span = chunk;
-        byte first = pattern[0];
-        bool firstIsWild = mask != null && mask[0] == 0;
-        int limit = chunk.Length - plen;
+        int lastStart = chunk.Length - plen;          // last valid pattern offset
+        int maxAnchor = lastStart + runStart;          // last valid anchor offset
+        int from = 0;
 
-        int i = 0;
-        while (i <= limit)
+        while (from <= maxAnchor)
         {
-            int pos;
-            if (firstIsWild)
+            int rel = span.Slice(from, maxAnchor - from + 1).IndexOf(anchor);
+            if (rel < 0) return;
+            int anchorPos = from + rel;
+            int patPos = anchorPos - runStart;
+
+            if (patPos >= 0)
             {
-                pos = i;
-            }
-            else
-            {
-                int rel = span.Slice(i, limit - i + 1).IndexOf(first);
-                if (rel < 0) return;
-                pos = i + rel;
+                bool ok = true;
+                for (int j = 0; j < plen; j++)
+                {
+                    if (mask is not null && mask[j] == 0) continue;
+                    if (span[patPos + j] != pattern[j]) { ok = false; break; }
+                }
+                if (ok) hits.Add(chunkBase + (ulong)patPos);
             }
 
-            bool ok = true;
-            for (int j = 0; j < plen; j++)
-            {
-                if (mask != null && mask[j] == 0) continue;
-                if (span[pos + j] != pattern[j]) { ok = false; break; }
-            }
-            if (ok) matches.Add(pos);
-            i = pos + 1;
+            from = anchorPos + 1;
         }
     }
 

@@ -75,6 +75,7 @@ then the tool locates the camera automatically. Drag with the pan hotkey (defaul
 D2RCameraTool.exe --cli --process D2R --out d2rcamera_scan.json
 D2RCameraTool.exe --cli --pid 12345 --out report.json      # explicit pid
 D2RCameraTool.exe --cli --allow-write --out report.json    # open with write access
+D2RCameraTool.exe --cli --allow-write --probe 0 --out report.json
 ```
 
 CLI mode attaches **read-only** unless `--allow-write` is given. Exit codes:
@@ -82,6 +83,23 @@ CLI mode attaches **read-only** unless `--allow-write` is given. Exit codes:
 
 The JSON report lists the best candidate and the top 50, each with its
 legacy-field match count, churn and score.
+
+`--probe N` writes a visible pitch offset to candidate *N*, holds it for 1.5s, then
+restores it. Watching the game view is the only conclusive test of which candidate is
+the real camera — if the view tilts and snaps back, that candidate is it. Requires
+`--allow-write`.
+
+### What the stages produce on a hostile memory layout
+
+Two synthetic targets are used to test the locator without the game:
+
+| Scenario | Expected path | Result |
+|---|---|---|
+| Camera keeps the 1.6-era values, plus stale byte copies | Stage A, churn breaks the tie | finds the live one |
+| Camera values changed, memory holds dead legacy-byte decoys | Stage A liveness check fails, escalate to Stage B | finds the changed-value camera |
+
+The second scenario is the important one: it is what a version update looks like. The
+legacy signature matches the decoys, and trusting it would return a dead address.
 
 ## Credits
 

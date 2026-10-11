@@ -117,10 +117,31 @@ namespace D2RCameraTool
                     c.Yaw,
                     c.LegacyExactFields,
                     c.Churn,
+                    c.ChurnWide,
                     c.Score,
                 }),
                 log = log.ToString().Split('\n'),
             };
+
+            // Optional write probe: the only fully conclusive test of "is this the camera"
+            // is to move it and see the view move. Requires --allow-write.
+            string? probeArg = ArgValue(args, "--probe");
+            if (probeArg is not null)
+            {
+                if (!writeAccess)
+                {
+                    Log("--probe needs --allow-write");
+                }
+                else if (!int.TryParse(probeArg, out int probeIndex)
+                         || probeIndex < 0 || probeIndex >= res.Candidates.Count)
+                {
+                    Log($"probe index out of range (0..{res.Candidates.Count - 1})");
+                }
+                else
+                {
+                    ProbeCandidate(res.Candidates[probeIndex], probeIndex, Log);
+                }
+            }
 
             string json = JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true });
             try
@@ -135,6 +156,32 @@ namespace D2RCameraTool
             }
 
             return res.Found ? 0 : 1;
+        }
+
+        /// <summary>
+        /// Writes a visible pitch offset to a candidate, then restores it. Watching the
+        /// in-game view is the only conclusive way to tell a real camera field from a
+        /// stale copy of the old constants.
+        /// </summary>
+        private static void ProbeCandidate(CameraCandidate c, int index, Action<string> log)
+        {
+            var orig = MemLib.ReadFloat(c.Base);
+            if (orig is null) { log($"probe #{index}: could not read 0x{c.Base:X}"); return; }
+
+            const float delta = -0.35f;
+            float poked = orig.Value + delta;
+
+            log($"PROBE #{index} 0x{c.Base:X}: pitch {orig.Value:F6} -> {poked:F6}");
+            log($"  write accepted: {MemLib.WriteFloat(c.Base, poked)}");
+            Thread.Sleep(1500);
+            var during = MemLib.ReadFloat(c.Base);
+            log($"  read back while poked: {(during?.ToString("F6") ?? "unreadable")}");
+
+            MemLib.WriteFloat(c.Base, orig.Value);
+            Thread.Sleep(300);
+            var after = MemLib.ReadFloat(c.Base);
+            log($"  restored to: {(after?.ToString("F6") ?? "unreadable")}");
+            log("  If the view visibly tilted for ~1.5s and then snapped back, this is the camera.");
         }
 
         private static string? ArgValue(string[] args, string name)

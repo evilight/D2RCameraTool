@@ -191,16 +191,35 @@ namespace D2RCameraTool
 
             byte[] pattern = BitConverter.GetBytes(target);
 
-            log($"worldpos-scan: searching the whole process for {target:F6} ...");
-            var hits = MemLib.FindAll(pattern);
-            log($"worldpos-scan: {hits.Count} address(es) hold that value");
+            // Search for the whole (x, y, z) triple rather than the single most distinctive
+            // component. Measured on the live game: the single value matched 4379 addresses and
+            // only the first 200 could be dumped, which discarded the structure that actually
+            // holds the character's facing. The 12-byte triple is far more selective, because it
+            // only matches where all three components sit consecutively.
+            byte[] triple = new byte[12];
+            Buffer.BlockCopy(BitConverter.GetBytes(wx), 0, triple, 0, 4);
+            Buffer.BlockCopy(BitConverter.GetBytes(wy), 0, triple, 4, 4);
+            Buffer.BlockCopy(BitConverter.GetBytes(wz), 0, triple, 8, 4);
+
+            log($"worldpos-scan: searching the whole process for the (x,y,z) triple ...");
+            var hits = MemLib.FindAll(triple);
+            log($"worldpos-scan: {hits.Count} address(es) hold the full triple");
+
+            if (hits.Count == 0)
+            {
+                log($"worldpos-scan: no triple matches - falling back to {target:F6} alone, "
+                    + "which will be far less selective");
+                hits = MemLib.FindAll(pattern);
+                log($"worldpos-scan: {hits.Count} address(es) hold that value");
+            }
+
             if (hits.Count > HitLimit)
                 log($"worldpos-scan: dumping only the first {HitLimit} of them");
 
             string dumpPath = Path.Combine(AppContext.BaseDirectory, "d2rcamera_wpos.log");
             var sb = new StringBuilder();
             sb.AppendLine($"# character world position ({wx:F6}, {wy:F6}, {wz:F6})   camera base 0x{baseAddr:X}");
-            sb.AppendLine($"# searched for {target:F6}   hits {hits.Count}   window +/-0x{Window:X}");
+            sb.AppendLine($"# searched for the (x,y,z) triple   hits {hits.Count}   window +/-0x{Window:X}");
             sb.AppendLine("# [pos]      one of the three position components");
             sb.AppendLine("# [angle?]   float inside [-pi, pi] - where a stored heading would live");
             sb.AppendLine("# [smallint] integer inside [-4096, 4096] - a direction index would be here");

@@ -54,6 +54,9 @@ namespace D2RCameraTool
         private Button SweepYaw_Button = null!;
         private Button SweepRoll_Button = null!;
         private Button MeasureRate_Button = null!;
+        private TextBox PitchDegrees_Box = null!;
+        private TextBox YawDegrees_Box = null!;
+        private TextBox RollDegrees_Box = null!;
         private System.Windows.Forms.Timer? wasdUiTimer;
         private System.Threading.Timer? wasdWriteTimer;
         private bool lastFocusState;
@@ -65,6 +68,14 @@ namespace D2RCameraTool
             // Created here, on the UI thread, so cues from a worker thread only ever need a
             // BeginInvoke rather than a cross-thread form construction.
             Program.Cue = new CueOverlay();
+
+            // Degrees alongside each angle. Added after construction rather than in the designer
+            // so they simply follow whatever the spinners' parent is, and stay put if the layout
+            // is rearranged.
+            PitchDegrees_Box = MakeDegreeBox(PitchSpinner);
+            YawDegrees_Box = MakeDegreeBox(CamPan_UpDown);
+            RollDegrees_Box = MakeDegreeBox(Roll_UpDown);
+            UpdateDegreeBoxes();
 
             PresetsArray = new CameraPreset[5];
             for (int i = 0; i < PresetsArray.Length; i++) {
@@ -530,9 +541,46 @@ namespace D2RCameraTool
             }
         }
 
+        /// <summary>
+        /// Reads the three camera angles in degrees next to their values in radians.
+        ///
+        /// The panel works in radians because that is what the game stores, but the thing being
+        /// judged is what the view looks like, and that is easier to reason about in degrees: the
+        /// default isometric pitch is -0.892 rad, which means nothing, versus -51.1 degrees, which
+        /// immediately says the camera is looking down at about 51 degrees. This also makes the
+        /// usable range obvious, since the interesting behaviour is at particular angles rather
+        /// than at particular radian values.
+        /// </summary>
+        private void UpdateDegreeBoxes() {
+            PitchDegrees_Box.Text = $"{PitchSpinner.Value * 180m / (decimal)Math.PI:F1}\u00B0";
+            YawDegrees_Box.Text = $"{CamPan_UpDown.Value * 180m / (decimal)Math.PI:F1}\u00B0";
+            RollDegrees_Box.Text = $"{Roll_UpDown.Value * 180m / (decimal)Math.PI:F1}\u00B0";
+        }
+
+        /// <summary>Puts a read-only degrees box between an angle's label and its spinner.</summary>
+        private TextBox MakeDegreeBox(Control spinner) {
+            // To the LEFT, not the right: the Reset buttons sit immediately to the right of these
+            // spinners, and Controls.Add appends to the end of the collection which is the BACK of
+            // the z-order, so a box placed there is drawn underneath a button and never seen. The
+            // gap between the row label and the spinner is free.
+            var box = new TextBox {
+                Location = new Point(spinner.Left - 84, spinner.Top),
+                Size = new Size(76, spinner.Height),
+                ReadOnly = true,
+                TabStop = false,
+                TextAlign = HorizontalAlignment.Right,
+                BackColor = SystemColors.Control,
+                BorderStyle = BorderStyle.FixedSingle,
+            };
+            spinner.Parent?.Controls.Add(box);
+            box.BringToFront();
+            return box;
+        }
+
         /// <summary>UI refresh, on the UI thread and deliberately slower than the write rate.</summary>
         private void WasdUi_Tick(object sender, EventArgs e) {
             if (Wasd.DisplayYawDirty || Wasd.DisplayPitchDirty) ApplyDisplays();
+            UpdateDegreeBoxes();
 
             int pid = Program.ProcessFound && Program.MemLib.IsOpen ? Program.MemLib.ProcessId : 0;
 

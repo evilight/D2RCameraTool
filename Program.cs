@@ -596,6 +596,102 @@ namespace D2RCameraTool
         /// does with it afterwards. Doing the whole sweep here keeps every step in one process, so
         /// there is no timing to synchronise between a write and a screenshot.
         /// </summary>
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+        private static extern bool Beep(uint frequency, uint duration);
+
+        /// <summary>
+        /// Measures the rate the yaw value actually changes at, in radians per second.
+        ///
+        /// The settings say SpeedRadPerSec, and the sweep proved writes land and are never
+        /// overridden, so the only remaining question is how much of that rate reaches the value
+        /// per second of wall time. Counting it directly answers that; inferring it from captured
+        /// frames cannot, because an isometric camera's rotation is a projective transform on
+        /// screen and an affine fit underestimates the angle badly.
+        ///
+        /// The countdown exists because the button is clicked while this window has focus, and the
+        /// WASD gate refuses to write unless the game does. Four seconds is enough to switch.
+        /// </summary>
+        public static void MeasureYawRate(int settleSeconds, int sampleSeconds, Action<string> log)
+        {
+            if (CamPanValue.BaseAddress <= 0)
+            {
+                log("rate: the camera is not located yet");
+                return;
+            }
+            if (!WriteAccessAvailable)
+            {
+                log("rate: needs write access - run the tool as administrator");
+                return;
+            }
+
+            log($"rate: starting in {settleSeconds}s. Switch to the game and HOLD D (or A) until "
+                + $"the beeping stops, about {settleSeconds + sampleSeconds} seconds in all.");
+
+            for (int i = settleSeconds; i > 0; i--)
+            {
+                Beep(600, 120);
+                Thread.Sleep(1000);
+            }
+            Beep(900, 250);   // start
+
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            var samples = new List<(double ms, float yaw)>();
+            while (clock.Elapsed.TotalSeconds < sampleSeconds)
+            {
+                samples.Add((clock.Elapsed.TotalMilliseconds, CamPanValue.Read()));
+                Thread.Sleep(40);
+            }
+            Beep(900, 250);   // stop
+
+            if (samples.Count < 5)
+            {
+                log("rate: too few samples");
+                return;
+            }
+
+            // Only the stretches where the value actually moved count. Including the idle time
+            // before the key goes down would average the rate down and hide the answer.
+            double movingSeconds = 0, movedRadians = 0, largestStep = 0;
+            int movingSamples = 0;
+            var perSecond = new Dictionary<int, double>();
+            for (int i = 1; i < samples.Count; i++)
+            {
+                double dt = (samples[i].ms - samples[i - 1].ms) / 1000.0;
+                if (dt <= 0) continue;
+                double d = samples[i].yaw - samples[i - 1].yaw;
+                if (Math.Abs(d) < 1e-6) continue;
+
+                movingSeconds += dt;
+                movedRadians += d;
+                movingSamples++;
+                largestStep = Math.Max(largestStep, Math.Abs(d));
+                int sec = (int)(samples[i].ms / 1000);
+                perSecond[sec] = perSecond.GetValueOrDefault(sec) + d;
+            }
+
+            log($"rate: {samples.Count} samples over {sampleSeconds}s; "
+                + $"{movingSamples} showed movement");
+            if (movingSamples == 0)
+            {
+                log("rate: the value never changed. Either D was not held while the game had "
+                    + "focus, or writes are being refused - check the WASD status line.");
+                return;
+            }
+
+            log($"rate: moved {movedRadians:F6} rad over {movingSeconds:F3}s of movement = "
+                + $"{movedRadians / movingSeconds:F4} rad/s "
+                + $"({movedRadians / movingSeconds * 180 / Math.PI:F1} deg/s); "
+                + $"configured {MainForm.Wasd.SpeedRadPerSec:F3} rad/s "
+                + $"({MainForm.Wasd.SpeedRadPerSec * 180 / Math.PI:F1} deg/s); "
+                + $"ratio {movedRadians / movingSeconds / Math.Max(1e-9, MainForm.Wasd.SpeedRadPerSec):F3}; "
+                + $"largest single step {largestStep:F6} rad");
+            foreach (var kv in perSecond.OrderBy(k => k.Key))
+                log($"rate:   second {kv.Key}: {kv.Value:+0.000000;-0.000000} rad");
+
+            CamPanValue.Write(samples[0].yaw);
+            log($"rate: yaw restored to {samples[0].yaw:F6}");
+        }
+
         public static void RunValueSweep(string which, string outDir, int steps, Action<string> log)
         {
             FloatValue? value = which.ToLowerInvariant() switch

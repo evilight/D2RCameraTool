@@ -54,6 +54,7 @@ namespace D2RCameraTool
         private Button SweepPitch_Button = null!;
         private Button SweepYaw_Button = null!;
         private Button SweepRoll_Button = null!;
+        private Button MeasureRate_Button = null!;
         private System.Windows.Forms.Timer? wasdUiTimer;
         private System.Threading.Timer? wasdWriteTimer;
         private bool lastFocusState;
@@ -310,10 +311,15 @@ namespace D2RCameraTool
                 Location = new Point(540, 14),
                 Size = new Size(110, 26),
             };
+            MeasureRate_Button = new Button {
+                Text = "Measure rate",
+                Location = new Point(658, 14),
+                Size = new Size(104, 26),
+            };
 
             SessionGroup.Controls.AddRange(new Control[] {
                 ResetAll_Button, OverShoulder_Button,
-                SweepPitch_Button, SweepYaw_Button, SweepRoll_Button,
+                SweepPitch_Button, SweepYaw_Button, SweepRoll_Button, MeasureRate_Button,
             });
 
             ClientSize = new Size(ClientSize.Width, ClientSize.Height + extra);
@@ -325,6 +331,37 @@ namespace D2RCameraTool
             SweepPitch_Button.Click += (_, _) => StartSweep("pitch");
             SweepYaw_Button.Click += (_, _) => StartSweep("yaw");
             SweepRoll_Button.Click += (_, _) => StartSweep("roll");
+            MeasureRate_Button.Click += (_, _) => StartRateMeasure();
+        }
+
+        /// <summary>
+        /// Counts how fast the yaw value really changes while a key is held. The button is clicked
+        /// with this window focused and the WASD gate refuses to write unless the game has focus,
+        /// so the measurement counts down first and the user switches over.
+        /// </summary>
+        private void StartRateMeasure() {
+            if (!Program.ValuesFound || Program.PitchValue.BaseAddress <= 0) {
+                Program.LogLine("Rate measure requested before the camera was located");
+                return;
+            }
+            MeasureRate_Button.Enabled = false;
+            MeasureRate_Button.Text = "measuring...";
+            Program.LogLine("Rate measure: 4 beeps, then hold D in the game for 5 seconds");
+
+            System.Threading.Tasks.Task.Run(() => {
+                try {
+                    Program.MeasureYawRate(4, 5, Program.LogLine);
+                } catch (Exception ex) {
+                    Program.LogLine("Rate measure failed: " + ex.Message);
+                } finally {
+                    try {
+                        BeginInvoke(() => {
+                            MeasureRate_Button.Enabled = true;
+                            MeasureRate_Button.Text = "Measure rate";
+                        });
+                    } catch { }
+                }
+            });
         }
 
         /// <summary>

@@ -120,8 +120,14 @@ namespace D2RCameraTool
                     res.Best.Churn,
                     res.Best.Score,
                 },
-                candidates = res.Candidates.Take(50).Select(c => new
-                {
+                // Byte-exact copies other than the ranked best. These are what the WASD control
+                // writes alongside the best address, so it is worth seeing them in the report.
+                mirrors = res.Candidates
+                    .Where(c => c.LegacyExactFields >= 4 && res.Best is not null
+                                && (long)c.Base != (long)res.Best.Base)
+                    .Select(c => "0x" + c.Base.ToString("X"))
+                    .ToList(),
+                candidates = res.Candidates.Take(50).Select(c => new                {
                     address = "0x" + c.Base.ToString("X"),
                     c.Roll,
                     c.Pitch,
@@ -328,6 +334,12 @@ namespace D2RCameraTool
             }
             catch { /* the label is best-effort */ }
 
+            LogLine(message);
+        }
+
+        /// <summary>Appends a line to d2rcamera.log without touching the status label.</summary>
+        internal static void LogLine(string message)
+        {
             try
             {
                 string log = Path.Combine(AppContext.BaseDirectory, "d2rcamera.log");
@@ -372,9 +384,27 @@ namespace D2RCameraTool
                 ValuesFound = true;
                 PlayBeepSound();
                 RefreshValues((long)res.Best.Base);
+
+                // The camera exists at more than one address (originally observed 0x170 apart,
+                // i.e. a current and a desired copy). If we write only the copy that happened to
+                // rank first, the engine can rebuild it from the other one - which is consistent
+                // with the reported behaviour: the view follows while we keep writing, then
+                // returns to its old position once we stop. Keeping every byte-exact copy in
+                // sync removes that possibility.
+                CameraMirrors.Clear();
+                foreach (var c in res.Candidates)
+                {
+                    if (c.LegacyExactFields < 4) continue;
+                    if ((long)c.Base == (long)res.Best.Base) continue;
+                    CameraMirrors.Add((long)c.Base);
+                }
+
                 UnlockValueControls();
                 Report($"Found via {res.Method} at 0x{res.Best.Base:X} "
-                       + $"(legacy {res.Best.LegacyExactFields}/4, churn {res.Best.Churn})");
+                       + $"(legacy {res.Best.LegacyExactFields}/4, churn {res.Best.Churn})"
+                       + (CameraMirrors.Count > 0
+                          ? $"; mirrors: {string.Join(", ", CameraMirrors.Select(m => "0x" + m.ToString("X")))}"
+                          : ""));
             }
             else
             {
@@ -445,9 +475,18 @@ namespace D2RCameraTool
             IsZoomScanning = false;
         }
 
+        /// <summary>
+        /// Other addresses that matched the legacy signature byte for byte. Written alongside
+        /// the ranked best so the engine cannot restore a stale copy over our changes.
+        /// </summary>
+        public static readonly List<long> CameraMirrors = new();
+
         public static void RefreshValues(long valuesBase)
         {
             if (valuesBase <= 0) return;
+
+            // The base address moved, so any mirror list from a previous locate is stale.
+            CameraMirrors.Clear();
 
             PitchValue.UpdateBase(valuesBase);
             CamHeightValue.UpdateBase(valuesBase + 0x4);

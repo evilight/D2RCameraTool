@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
@@ -55,6 +55,13 @@ namespace D2RCameraTool
         public static event EventHandler<KeyEventArgs> KeyPressed;
         public static event EventHandler<KeyEventArgs> KeyReleased;
 
+        /// <summary>
+        /// Optional filter: returning true swallows the key so no other application sees it.
+        /// Used to keep W/A/S/D away from the game while the WASD camera control owns them.
+        /// The callback runs on the thread that installed the hook (the UI thread).
+        /// </summary>
+        public static Func<Keys, bool>? SuppressKey;
+
         public const int WM_HOTKEY = 0x0312;
         public const int WH_KEYBOARD_LL = 13;
         public const int WM_KEYDOWN = 0x0100;
@@ -83,6 +90,16 @@ namespace D2RCameraTool
                 } else if (wParam == (IntPtr)WM_KEYUP) {
                     KeyReleased?.Invoke(null, new KeyEventArgs(key));
                 }
+
+                // Returning non-zero without chaining stops the key here. Decided after the
+                // events so the tool still observes its own hotkeys.
+                bool swallow = false;
+                try {
+                    swallow = SuppressKey?.Invoke(key) == true;
+                } catch {
+                    swallow = false;
+                }
+                if (swallow) return (IntPtr)1;
             }
             return CallNextHookEx(IntPtr.Zero, nCode, wParam, lParam);
         }

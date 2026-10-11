@@ -125,6 +125,67 @@ Run `D2RCameraTool.exe`. Enter the process name (`D2R`), wait for "Process found
 then the tool locates the camera automatically. Drag with the pan hotkey (default
 `Space`) to orbit, and the zoom hotkey (default `Z`) to zoom.
 
+### WASD camera control
+
+Hold the keys to swing the camera continuously, like a third-person game:
+
+| key | effect |
+|---|---|
+| `A` / `D` | swing the view direction left / right (yaw) |
+| `W` | look toward the ground (pitch down) |
+| `S` | look toward the sky (pitch up) |
+
+Movement is **time-based** (radians per second, `wasd_speed`, default `1.2`), so the feel
+does not change with frame rate or with how often the UI loop happens to run. The keys are
+read with `GetAsyncKeyState` rather than tracked from the keyboard hook, because a hook that
+Windows silently removes after a timeout would leave a direction stuck on forever.
+
+Movement only applies while the game owns the **foreground window** (`wasd_require_focus`),
+so the camera cannot rotate while you are typing somewhere else. The panel shows whether the
+game is currently considered focused — that is the first thing to check if nothing happens.
+
+By default `wasd_block_keys` is on: while the game is focused, W/A/S/D are swallowed by the
+keyboard hook so the game does not also act on them. Only those four keys, and only while
+the game is focused.
+
+**If an axis feels backwards, tick `Invert yaw` or `Invert pitch`.** I could not verify the
+sign of yaw against the live game, so the default direction for A/D is a guess.
+
+Limits: yaw is CLAMPED at ±π — it stops at the limit rather than wrapping round to the other
+end, because the wrap read as the view snapping. Pitch is clamped to `[-1.55, +0.30]` rad
+(almost straight down, to slightly above horizontal). Both live at the top of
+`WasdCameraControl.cs` and are shared by the WASD keys and the mouse-drag path.
+
+All six settings live in `settings.ini` and are written back when you press Save.
+
+### Session buttons
+
+**Reset all values** puts every camera value back in one click - pitch, yaw, roll, height and
+zoom. It does **not** exit; closing stays separate.
+
+Use it before you quit. The values are what the locator keys on: leaving pitch or yaw rotated
+means the legacy signature no longer matches on the next launch and the tool falls back to the
+slower structural scan, or fails outright on a hostile layout. It writes the pristine 1.6-era
+byte patterns rather than whatever was in memory when the tool attached, because those patterns
+are what restore the signature. Each press is logged with a read-back, so the log records the
+state the game was left in.
+
+**Over-shoulder pose** is an experiment, not a working third-person mode. It sets
+`pitch = -0.15`, `roll = 0`, `zoom = 2.0` and leaves yaw and height alone, which drops the
+camera from the default 51 degrees looking down to about 8 degrees - roughly eye level, looking
+forward. The constants are at the top of `CameraPresets.cs`.
+
+Two things to know before expecting a real third-person camera:
+
+* **The camera does not follow the character.** Yaw is a fixed rotation in world space with no
+  link to the character's facing, so turning the character shows you their side and then their
+  front. A follow camera would need the character's own heading located in memory and the camera
+  yaw driven from it every frame - doable, but a separate piece of work.
+* **There is no camera collision.** Back the character against a wall and the camera goes inside
+  it. Levels were also never authored to be seen from ground level, so expect missing geometry,
+  wrong culling and close-up texture blur. The preset exists mainly to find out how bad that is
+  before investing in the follow logic.
+
 ### Headless locate (diagnostics / re-deriving after a game update)
 
 ```
